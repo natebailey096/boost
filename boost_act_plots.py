@@ -9,7 +9,9 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        the three estimates, and aberration against modulation)
     plots/aberration/  lensing QE, solved without assuming the modulation
     plots/modulation/  modulation QE, solved without assuming the aberration
-    plots/joint/       one velocity for both effects
+    plots/joint/       one velocity for both effects; inverse_response is
+                       K^-1 (what the separate estimates apply) and the
+                       joint fit's map G, with jackknife errors
     plots/report.md    the setup, where every error comes from, and the
                        mean +- error of each quantity in the figures
 
@@ -80,6 +82,26 @@ def ellipse(ax, xy, cov, nsig, **kw):
     ax.add_patch(Ellipse(xy, 2 * nsig * np.sqrt(val[1]),
                          2 * nsig * np.sqrt(val[0]), angle=ang, fill=False,
                          **kw))
+
+
+def jackknife_sd(reps):
+    """Jackknife error from leave-one-out copies stacked along axis 0."""
+    reps = np.asarray(reps)
+    return np.sqrt((len(reps) - 1) * reps.var(axis=0))
+
+
+def pm(value, err=None):
+    """A matrix cell: the value, and under it +- err, with enough decimals
+    (at least 3) to show two significant figures of err."""
+    if err is None or not np.isfinite(err) or err <= 0:
+        return f"{value:+.3f}"
+    d = int(max(3, 1 - np.floor(np.log10(err))))
+    return f"{value:+.{d}f}\n$\\pm${err:.{d}f}"
+
+
+NO_JK = ("errors on the inverses need the jackknife copies of K, which this "
+         "summary.npz (from an older boost_act.py) lacks: rerun boost_act.py "
+         "with the same options; it reuses the cached sims and makes none")
 
 
 def load(path, name=None):
@@ -175,9 +197,7 @@ def plot_response_6x6(S, path):
         im = ax.imshow(M, cmap="RdBu_r", vmin=-v, vmax=v)
         for i in range(6):
             for j in range(6):
-                txt = f"{M[i, j]:+.3f}"
-                if M is S["K"]:
-                    txt += f"\n$\\pm${S['Kerr'][i, j]:.3f}"
+                txt = pm(M[i, j], S["Kerr"][i, j] if M is S["K"] else None)
                 ax.text(j, i, txt, ha="center", va="center", fontsize=8)
         ax.axhline(2.5, color="k", lw=1.5)
         ax.axvline(2.5, color="k", lw=1.5)
@@ -276,20 +296,22 @@ def plot_response_matrix(S, path):
     +- error on the mean, the inverse of that block, and the eigenvalues of
     its symmetric part."""
     R, Rerr = S["R"], S["Rerr"]
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4.4), layout="constrained")
-    for ax, M, name in ((axes[0], R, "$R$ (own block of $K$)"),
-                        (axes[1], np.linalg.inv(R), "$R^{-1}$")):
+    Rinv_err = (jackknife_sd([np.linalg.inv(r) for r in S["R_jk"]])
+                if "R_jk" in S else None)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.8), layout="constrained")
+    for ax, M, E, name in ((axes[0], R, Rerr, "$R$ (own block of $K$)"),
+                           (axes[1], np.linalg.inv(R), Rinv_err, "$R^{-1}$")):
         v = np.abs(M).max()
         im = ax.imshow(M, cmap="RdBu_r", vmin=-v, vmax=v)
         for i in range(3):
             for j in range(3):
-                txt = f"{M[i, j]:+.3f}"
-                if M is R:
-                    txt += f"\n$\\pm${Rerr[i, j]:.3f}"
+                txt = pm(M[i, j], None if E is None else E[i, j])
                 ax.text(j, i, txt, ha="center", va="center", fontsize=8.5)
         ax.set_xticks(range(3), ["x", "y", "z"])
         ax.set_yticks(range(3), ["x", "y", "z"])
-        ax.set_xlabel("boost along")
+        # R maps a boost to the estimator's components; R^-1 the other way.
+        ax.set_xlabel("boost along" if M is R else "estimator component")
+        ax.set_ylabel("estimator component" if M is R else "boost along")
         ax.set_title(name)
         ax.grid(False)
         fig.colorbar(im, ax=ax, fraction=0.046)
@@ -302,6 +324,57 @@ def plot_response_matrix(S, path):
     axes[2].set_xticks(range(3), labels, fontsize=8.5)
     axes[2].set_ylabel("eigenvalue of $(R+R^T)/2$")
     fig.suptitle(TITLES[S["name"]])
+    fig.supxlabel(
+        (f"$R$: ± error on the mean; $R^{{-1}}$: ± jackknife error over the "
+         f"{len(S['R_jk'])} response sims.  The separate estimates apply rows "
+         "of the full $K^{-1}$ (joint/inverse_response.png), not $R^{-1}$."
+         if Rinv_err is not None else NO_JK), fontsize=8.5)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_inverse_response(S, path):
+    """What the estimates apply to the six estimator components (mean field
+    removed): K^-1, whose first three rows give the separate u_aber and the
+    last three u_mod, and the joint fit's G, which gives the one u.  Each is
+    +- its jackknife error over the response sims; for G the mean-field
+    covariance is held fixed, so this is K's share of its error only."""
+    comps = ["aber x QE", "aber y QE", "aber z QE",
+             "mod x QE", "mod y QE", "mod z QE"]
+    have = "K_jk" in S
+    Kinv = np.linalg.inv(S["K"])
+    panels = [(Kinv,
+               jackknife_sd([np.linalg.inv(k) for k in S["K_jk"]]) if have
+               else None,
+               [rf"$u_{{\rm aber}}$ {a}" for a in "xyz"]
+               + [rf"$u_{{\rm mod}}$ {a}" for a in "xyz"],
+               "$K^{-1}$: separate estimates (rows: the u each one gives)")]
+    if "G" in S:
+        panels.append((S["G"], jackknife_sd(S["G_jk"]), [f"$u$ {a}" for a in "xyz"],
+                       "$G$: joint estimate, one $u$ for both effects"))
+    fig, axes = plt.subplots(len(panels), 1, figsize=(10, 4 + 2.2 * len(panels)),
+                             height_ratios=[len(p[2]) for p in panels],
+                             layout="constrained", squeeze=False)
+    for ax, (M, E, rows, title) in zip(axes[:, 0], panels):
+        v = np.abs(M).max()
+        im = ax.imshow(M, cmap="RdBu_r", vmin=-v, vmax=v, aspect="auto")
+        for i in range(len(rows)):
+            for j in range(6):
+                txt = pm(M[i, j], None if E is None else E[i, j])
+                ax.text(j, i, txt, ha="center", va="center", fontsize=8.5)
+        ax.axvline(2.5, color="k", lw=1.5)
+        if len(rows) == 6:
+            ax.axhline(2.5, color="k", lw=1.5)
+        ax.set_xticks(range(6), comps, rotation=45)
+        ax.set_yticks(range(len(rows)), rows)
+        ax.set_title(title)
+        ax.grid(False)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+    axes[-1, 0].set_xlabel("estimator component (mean field removed)")
+    fig.supxlabel(
+        (f"± jackknife error over the {len(S['K_jk'])} response sims; for $G$ "
+         "the mean-field covariance is held fixed (K's share of the error)"
+         if have else NO_JK), fontsize=8.5)
     fig.savefig(path)
     plt.close(fig)
 
@@ -664,7 +737,8 @@ def make_all(summary, outdir=None):
             (os.path.join(outdir, "aberration"), "aberration", PER_ESTIMATOR),
             (os.path.join(outdir, "modulation"), "modulation", PER_ESTIMATOR),
             (os.path.join(outdir, "joint"), "joint",
-             [plot_whisker, plot_planes, plot_amplitude_direction])]
+             [plot_whisker, plot_planes, plot_amplitude_direction]),
+            (os.path.join(outdir, "joint"), "system", [plot_inverse_response])]
     for folder, name, fns in jobs:
         os.makedirs(folder, exist_ok=True)
         S = load(summary, name)

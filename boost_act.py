@@ -551,10 +551,17 @@ def analyse(mf, diff, dat):
         blk = np.s_[3 * i:3 * i + 3, 3 * i:3 * i + 3]
         eig = [np.linalg.eigvalsh(0.5 * (Kk[blk] + Kk[blk].T)) for Kk in K_jk]
         out[name].update(higher_l(Y[i], i), R=K[blk], Rerr=Kerr[blk],
-                         eig_err=np.sqrt((len(eig) - 1) * np.var(eig, axis=0)))
+                         eig_err=np.sqrt((len(eig) - 1) * np.var(eig, axis=0)),
+                         R_jk=np.array([Kk[blk] for Kk in K_jk]))
     sd = np.sqrt(np.diag(C))
+    # For the figures only: the leave-one-response-sim-out copies of K, and
+    # the joint fit's linear map G with its copies, so the plots can show
+    # jackknife errors on R^-1, K^-1 and G.  Nothing above uses them.
     out["system"] = dict(K=K, Kerr=Kerr, corr=C / np.outer(sd, sd),
-                         mf_ratio=mf_ratio)
+                         mf_ratio=mf_ratio, K_jk=np.array(K_jk),
+                         G=linear_maps(K, C)["joint"],
+                         G_jk=np.array([linear_maps(Kk, C)["joint"]
+                                        for Kk in K_jk]))
 
     print("\nseparate aberration amplitude for each lensing combination")
     rows = []
