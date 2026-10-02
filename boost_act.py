@@ -41,10 +41,8 @@ full-sky normalisations, and the mask is dealt with by simulation:
     A  mean field  unboosted, masked, noisy sims.  On the mask the modulation
                    QE reconstructs the mask itself, so its mean field is
                    large (printed as |mean field| / |K u_in|); it is
-                   subtracted, and its Monte Carlo error is part of the
-                   error on every mean.  On the full sky it is zero in
-                   expectation but still measured: its covariance weights
-                   the joint fit.
+                   subtracted.  On the full sky it is zero in expectation
+                   but still measured: its covariance weights the joint fit.
     B  response    noise-free masked sims, each reconstructed once unboosted
                    and once boosted by +beta along x, y and z, with
                    aberration only and with modulation only (7
@@ -66,6 +64,13 @@ full-sky normalisations, and the mask is dealt with by simulation:
                the other effect and they are not assumed equal
     joint      one u for both effects (equal in these sims), weighted by the
                covariance of the six estimator components
+
+The error on a mean is sd / sqrt(n_data), the scatter of the data sims
+alone.  The Monte Carlo errors of the mean field and of K are shared by every
+data sim and are left out: the mean field's is about sqrt(n_data / n_mf)
+times this one (it understates the total by sqrt(1 + n_data / n_mf), 22% for
+800 mean-field and 400 data sims), so use n_mf >> n_data; K's is small, as
+each response sim cancels most of its CMB.
 
 Each reconstruction is cached in cache_boost/<mask>_<noise>/sims/ (one .npy
 per sim, named by stage and index; the seeds follow the index), so an
@@ -436,16 +441,14 @@ def stats(u):
 
 def report(title, e):
     """Print one estimate and return what the summary keeps of it."""
-    mean, sd, err, part = e["mean"], e["sd"], e["err"], e["err_parts"]
+    mean, sd, err = e["mean"], e["sd"], e["err"]
     dirs = e["u"] / np.linalg.norm(e["u"], axis=1)[:, None]
     ubar = e["u"].mean(axis=0) / np.linalg.norm(e["u"].mean(axis=0))
     l_in, b_in = galactic(D_TRUE)
     v_in = C_KMS * U_TRUE
     print(f"\n{title}")
     print(f"   A = {mean[0]:+.4f} +- {sd[0]:.4f} (sd), +- {err[0]:.4f} "
-          f"(error on the mean)   expect 1")
-    print(f"       error on the mean from data {part[0, 0]:.4f}, mean field "
-          f"{part[1, 0]:.4f}, response {part[2, 0]:.4f}")
+          f"(error on the mean, sd/sqrt(n_data))   expect 1")
     print(f"   null A = {e['null'].mean():+.4f} +- {e['null_err']:.4f}"
           f"   expect 0")
     print("   v [km/s]  " + "   ".join(
@@ -460,7 +463,7 @@ def report(title, e):
           f"{np.median(np.degrees(np.arccos(np.clip(dirs @ D_TRUE, -1, 1)))):.1f} deg")
     return dict(amp=e["stats"][:, 0], vel=e["stats"][:, 1:4], dir=dirs,
                 null=e["null"], null_err=e["null_err"], stat_mean=mean,
-                stat_sd=sd, stat_err=err, stat_err_parts=part)
+                stat_sd=sd, stat_err=err)
 
 
 def higher_l(Y, own):
@@ -494,22 +497,13 @@ def linear_maps(K, C):
 def solve(names, mf, diff, dat):
     """The three estimates of u from one pair of estimators, with the mean,
     sd and error on the mean of their per-sim statistics.  The error on the
-    mean has three independent parts: the scatter of the data sims, and, by
-    jackknife, the mean field and K, which every data sim shares."""
+    mean is the scatter of the data sims only, sd / sqrt(n_data).  The mean
+    field and K, which every data sim shares, add errors of their own that
+    this leaves out: for the mean field about sqrt(n_data / n_mf) times this
+    one, so it needs n_mf >> n_data to be negligible."""
     Y, y_mf, y_dat, K, Kerr = system(names, mf, diff, dat)
-    n_m, n_r = len(y_mf), diff.shape[2]
+    n_m = len(y_mf)
     m, C = y_mf.mean(axis=0), np.cov(y_mf, rowvar=False)
-
-    def means(m, C, K):
-        L = linear_maps(K, C)
-        return {e: stats((y_dat - m) @ L[e].T).mean(axis=0) for e in L}
-
-    jk_mf = [means(r.mean(axis=0), np.cov(r, rowvar=False), K)
-             for r in (np.delete(y_mf, k, axis=0) for k in range(n_m))]
-    K_jk = [system(names, mf, np.delete(diff, k, axis=2), dat)[3]
-            for k in range(n_r)]
-    jk_resp = [means(m, C, Kk) for Kk in K_jk]
-
     L = linear_maps(K, C)
     h = n_m // 2
     null_y = y_mf[h:] - y_mf[:h].mean(axis=0)     # split-half null test
@@ -517,19 +511,20 @@ def solve(names, mf, diff, dat):
     for e in L:
         u = (y_dat - m) @ L[e].T
         st = stats(u)
-        var = np.array([st.var(axis=0, ddof=1) / len(st),
-                        (n_m - 1) * np.var([j[e] for j in jk_mf], axis=0),
-                        (n_r - 1) * np.var([j[e] for j in jk_resp], axis=0)])
+        sd = st.std(axis=0, ddof=1)
         null = null_y @ L[e].T @ U_TRUE / (U_TRUE @ U_TRUE)
-        est[e] = dict(u=u, stats=st, mean=st.mean(axis=0),
-                      sd=st.std(axis=0, ddof=1), err=np.sqrt(var.sum(axis=0)),
-                      err_parts=np.sqrt(var), null=null,
+        est[e] = dict(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
+                      err=sd / np.sqrt(len(st)), null=null,
                       null_err=null.std(ddof=1) * np.sqrt(1 / len(null) + 1 / h))
-    return Y, K, Kerr, m, C, est, K_jk
+    return Y, K, Kerr, m, C, est
 
 
 def analyse(mf, diff, dat):
-    Y, K, Kerr, m, C, est, K_jk = solve((ABER_CASE, "MOD"), mf, diff, dat)
+    Y, K, Kerr, m, C, est = solve((ABER_CASE, "MOD"), mf, diff, dat)
+    # Leave-one-response-sim-out copies of K, for the figures' errors on
+    # R^-1, K^-1, G and the eigenvalues of R; no estimate or error uses them.
+    K_jk = [system((ABER_CASE, "MOD"), mf, np.delete(diff, k, axis=2), dat)[3]
+            for k in range(diff.shape[2])]
     Kj = K[:, :3] + K[:, 3:]
     mf_ratio = np.array([np.linalg.norm(m[i:i + 3])
                          / np.linalg.norm(Kj[i:i + 3] @ U_TRUE) for i in (0, 3)])
@@ -554,9 +549,8 @@ def analyse(mf, diff, dat):
                          eig_err=np.sqrt((len(eig) - 1) * np.var(eig, axis=0)),
                          R_jk=np.array([Kk[blk] for Kk in K_jk]))
     sd = np.sqrt(np.diag(C))
-    # For the figures only: the leave-one-response-sim-out copies of K, and
-    # the joint fit's linear map G with its copies, so the plots can show
-    # jackknife errors on R^-1, K^-1 and G.  Nothing above uses them.
+    # For the figures only: the copies of K, and the joint fit's linear map G
+    # with its copies, so the plots can show errors on R^-1, K^-1 and G.
     out["system"] = dict(K=K, Kerr=Kerr, corr=C / np.outer(sd, sd),
                          mf_ratio=mf_ratio, K_jk=np.array(K_jk),
                          G=linear_maps(K, C)["joint"],

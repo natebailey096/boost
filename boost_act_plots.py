@@ -16,8 +16,8 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        mean +- error of each quantity in the figures
 
 Boxes and ellipses are standard deviations (1 and 2 sd).  Error bars on a
-mean are the pipeline's stat_err: the data, mean-field and response sims
-(the last two by jackknife) added in quadrature.  report.md explains each.
+mean are the pipeline's stat_err, sd / sqrt(n_data) over the data sims; the
+Monte Carlo errors of the mean field and of K are not included (report.md).
 """
 
 import argparse
@@ -33,9 +33,8 @@ from matplotlib.patches import Ellipse, Rectangle
 
 COR, TRUTH, RAW, INK = "#0072B2", "#C02A2A", "#E69F00", "#1A1A1A"
 COLOURS = {"aberration": COR, "modulation": RAW, "joint": "#009E73"}
-TITLES = {"aberration": "aberration (lensing QE), separate",
-          "modulation": "Doppler modulation (TT QE), separate",
-          "joint": "joint: one velocity for both effects"}
+TITLES = {"aberration": "Aberration", "modulation": "Modulation",
+          "joint": "Boost"}
 plt.rcParams.update({"font.size": 11, "axes.grid": True, "grid.alpha": 0.2,
                      "legend.frameon": False, "figure.dpi": 150,
                      "savefig.bbox": "tight"})
@@ -201,13 +200,14 @@ def plot_response_6x6(S, path):
                 ax.text(j, i, txt, ha="center", va="center", fontsize=8)
         ax.axhline(2.5, color="k", lw=1.5)
         ax.axvline(2.5, color="k", lw=1.5)
-        ax.set_yticks(range(6), [f"{l} QE" for l in labels])
-        ax.set_xticks(range(6), labels if M is S["K"] else
-                      [f"{l} QE" for l in labels], rotation=45)
+        ax.set_yticks(range(6), labels)
+        ax.set_xticks(range(6), labels, rotation=45)
+        ax.set_ylabel("estimator component")
         ax.set_title(title)
         ax.grid(False)
         fig.colorbar(im, ax=ax, fraction=0.046)
     axes[0].set_xlabel("boost: effect and axis")
+    axes[1].set_xlabel("estimator component")
     fig.savefig(path)
     plt.close(fig)
 
@@ -223,7 +223,7 @@ def plot_comparison(S3, path):
         a = S["amp"]
         ax0.hist(a, bins=bins, histtype="step", lw=1.8,
                  color=COLOURS[S["name"]],
-                 label=f"{S['name']}: {a.mean():+.3f} $\\pm$ "
+                 label=f"{TITLES[S['name']]}: {a.mean():+.3f} $\\pm$ "
                        f"{a.std(ddof=1):.3f} (sd)")
     ax0.axvline(1.0, color=TRUTH, lw=2, label="input")
     ax0.set_xlabel("amplitude $A$")
@@ -241,8 +241,8 @@ def plot_comparison(S3, path):
 
 def plot_whisker(S, path):
     """v_x, v_y, v_z: mean +- 1 sd boxes, +- 2 sd whiskers.  Below, the
-    mean minus the input with its error on the mean from all three sets of
-    sims (data, mean field, and response by jackknife)."""
+    mean minus the input with its error on the mean, sd / sqrt(n_data)
+    over the data sims."""
     vel, v_true = S["vel"], S["v_true"]
     m, sd = vel.mean(axis=0), vel.std(axis=0, ddof=1)
     err = S["stat_err"][1:4]
@@ -339,8 +339,7 @@ def plot_inverse_response(S, path):
     last three u_mod, and the joint fit's G, which gives the one u.  Each is
     +- its jackknife error over the response sims; for G the mean-field
     covariance is held fixed, so this is K's share of its error only."""
-    comps = ["aber x QE", "aber y QE", "aber z QE",
-             "mod x QE", "mod y QE", "mod z QE"]
+    comps = ["aber x", "aber y", "aber z", "mod x", "mod y", "mod z"]
     have = "K_jk" in S
     Kinv = np.linalg.inv(S["K"])
     panels = [(Kinv,
@@ -578,19 +577,14 @@ def write_report(summary, path):
       "sky would have.  The boxes, whiskers, ellipses and histograms show it.\n")
     w("**Error on the mean** is how well the average over all the sims is "
       "known, so it sets how precisely this run tests for bias: compare "
-      "mean − input with it (last column of the tables).  It has three "
-      "independent parts, added in quadrature:\n")
-    w(f"1. *data*: the sd of the {n_d} data sims divided by √{n_d}.")
-    w(f"2. *mean field*: one mean field, averaged over {n_mf} sims, is "
-      "subtracted from every data sim, so its error does not shrink with "
-      "more data sims.  It is found by jackknife: leave one mean-field sim "
-      "out, redo the estimate (including the joint weights), repeat for each "
-      "sim, and take (N − 1)/N times the sum of the squared deviations.")
-    w(f"3. *response*: every data sim is corrected with the same K, measured "
-      f"from {n_r} response sims; jackknife over the response sims in the "
-      f"same way.\n")
-    w("The jackknife works for every quantity, including ℓ and b, which are "
-      "not linear in the sims.\n")
+      f"mean − input with it (last column of the tables).  It is the sd of "
+      f"the {n_d} data sims divided by √{n_d}.  The mean field (averaged over "
+      f"{n_mf} sims) and K (from {n_r} response sims) are shared by every "
+      "data sim, and their Monte Carlo errors are not included.  The mean "
+      "field's is about √(n_data/n_mf) times the quoted error, so the quoted "
+      f"error is low by about a factor √(1 + n_data/n_mf) = "
+      f"{np.sqrt(1 + n_d / n_mf):.2f} here; K's is small, because each "
+      "response sim cancels most of its CMB.\n")
     w("**Other errors.**\n")
     w(f"- K and its diagonal blocks R: the sd of each element over the {n_r} "
       f"response sims divided by √{n_r}.  Eigenvalues of R: jackknife over the "
@@ -639,19 +633,16 @@ def write_report(summary, path):
     fmt = [".4f", ".1f", ".1f", ".1f", ".2f", ".2f"]
     for n, e in E.items():
         w(f"\n## {TITLES[n][0].upper() + TITLES[n][1:]} (`{n}/`)\n")
-        w("Mean ± error on the mean with its three parts, and the sd of one "
-          "sim (`whisker.png`, `planes.png`, `amplitude_direction.png`).\n")
-        w("| quantity | input | mean | error on the mean | data | mean field "
-          "| response | sd (one sim) | (mean − input)/error |\n"
-          "|---|---|---|---|---|---|---|---|---|")
+        w("Mean ± error on the mean (sd/√n_data), and the sd of one sim "
+          "(`whisker.png`, `planes.png`, `amplitude_direction.png`).\n")
+        w("| quantity | input | mean | error on the mean | sd (one sim) "
+          "| (mean − input)/error |\n|---|---|---|---|---|---|")
         for k in range(6):
             f, mu, er = fmt[k], e["stat_mean"][k], e["stat_err"][k]
-            p = e["stat_err_parts"][:, k]
             w(f"| {label[k]} | {truth[k]:+{f}} | {mu:+{f}} | {er:{f}} | "
-              f"{p[0]:{f}} | {p[1]:{f}} | {p[2]:{f}} | {e['stat_sd'][k]:{f}} "
-              f"| {(mu - truth[k]) / er:+.2f} |")
+              f"{e['stat_sd'][k]:{f}} | {(mu - truth[k]) / er:+.2f} |")
         nl, ne = e["null"], float(e["null_err"])
-        w(f"| null A | 0 | {nl.mean():+.4f} | {ne:.4f} | | | | "
+        w(f"| null A | 0 | {nl.mean():+.4f} | {ne:.4f} | "
           f"{nl.std(ddof=1):.4f} | {nl.mean() / ne:+.2f} |")
         ubar = e["vel"].mean(axis=0) / np.linalg.norm(e["vel"].mean(axis=0))
         sep = np.degrees(np.arccos(np.clip(e["dir"] @ S["d_true"], -1, 1)))
