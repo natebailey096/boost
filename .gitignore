@@ -1,0 +1,5 @@
+env/
+src/
+cache_boost/
+logs/
+*.fits
