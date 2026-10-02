@@ -11,7 +11,8 @@ matplotlib only, so they can be redrawn without rerunning anything).
     plots/modulation/  modulation QE, solved without assuming the aberration
     plots/joint/       one velocity for both effects; inverse_response is
                        K^-1 (what the separate estimates apply) and the
-                       joint fit's map G, with jackknife errors
+                       joint map G (the weighted average of the two
+                       separate estimates), with jackknife errors
     plots/report.md    the setup, where every error comes from, and the
                        mean +- error of each quantity in the figures
 
@@ -214,7 +215,7 @@ def plot_response_6x6(S, path):
 
 def plot_comparison(S3, path):
     """A from the three estimates, and aberration against modulation sim by
-    sim: their correlation is what the joint fit uses."""
+    sim: the more correlated they are, the less combining them gains."""
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.6),
                                    layout="constrained")
     allamp = np.concatenate([S["amp"] for S in S3])
@@ -336,9 +337,9 @@ def plot_response_matrix(S, path):
 def plot_inverse_response(S, path):
     """What the estimates apply to the six estimator components (mean field
     removed): K^-1, whose first three rows give the separate u_aber and the
-    last three u_mod, and the joint fit's G, which gives the one u.  Each is
-    +- its jackknife error over the response sims; for G the mean-field
-    covariance is held fixed, so this is K's share of its error only."""
+    last three u_mod, and the joint G, which gives the one u as a weighted
+    average of the two.  Each is +- its jackknife error over the response
+    sims; for G the weights are recomputed for each leave-one-out K."""
     comps = ["aber x", "aber y", "aber z", "mod x", "mod y", "mod z"]
     have = "K_jk" in S
     Kinv = np.linalg.inv(S["K"])
@@ -350,7 +351,9 @@ def plot_inverse_response(S, path):
                "$K^{-1}$: separate estimates (rows: the u each one gives)")]
     if "G" in S:
         panels.append((S["G"], jackknife_sd(S["G_jk"]), [f"$u$ {a}" for a in "xyz"],
-                       "$G$: joint estimate, one $u$ for both effects"))
+                       "$G$: joint estimate, weighted average of the two "
+                       "separate estimates" if "w_joint" in S else
+                       "$G$: joint estimate (older run, covariance-weighted)"))
     fig, axes = plt.subplots(len(panels), 1, figsize=(10, 4 + 2.2 * len(panels)),
                              height_ratios=[len(p[2]) for p in panels],
                              layout="constrained", squeeze=False)
@@ -372,7 +375,7 @@ def plot_inverse_response(S, path):
     axes[-1, 0].set_xlabel("estimator component (mean field removed)")
     fig.supxlabel(
         (f"± jackknife error over the {len(S['K_jk'])} response sims; for $G$ "
-         "the mean-field covariance is held fixed (K's share of the error)"
+         "the weights are recomputed for each leave-one-out $K$"
          if have else NO_JK), fontsize=8.5)
     fig.savefig(path)
     plt.close(fig)
@@ -564,8 +567,14 @@ def write_report(summary, path):
       "the input.\n")
     w("**Three estimates.**  *Aberration* and *modulation* are solved together "
       "from the 6×6 response K, so neither assumes the other has the same "
-      "velocity.  *Joint* fits one velocity to both, weighted by the "
-      "covariance of the six estimator components over the mean-field sims.\n")
+      "velocity.  *Joint* assumes one velocity for both: per axis, it is a "
+      "weighted average of the aberration and modulation estimates, with "
+      "weight w = s_mod² / (s_ab² + s_mod²) on aberration, where s is the sd "
+      "of that estimate over the mean-field sims, so the less noisy one counts "
+      "more.  Each separate estimate is unbiased for the same u, so any "
+      "weights that sum to 1 are; these are the inverse-variance weights when "
+      "the two are uncorrelated, and the correlation between them is not "
+      "used.\n")
     w("**Response K.**  Each response sim is reconstructed unboosted and "
       "boosted by +β along x, y and z, with aberration only and with "
       "modulation only; (boosted − unboosted)/β is one column of K.  The "
@@ -610,6 +619,9 @@ def write_report(summary, path):
     w(f"\nMean field relative to the signal, |mean field| / |K u_in|: "
       f"aberration QE {sy['mf_ratio'][0]:.2f}, modulation QE "
       f"{sy['mf_ratio'][1]:.2f}.\n")
+    if "w_joint" in sy:
+        w("Joint weight on the aberration estimate (modulation gets 1 − w), "
+          "x, y, z: " + ", ".join(f"{v:.3f}" for v in sy["w_joint"]) + ".\n")
     w(f"Correlation of the six components over the {n_mf} mean-field sims "
       f"(error about {1 / np.sqrt(n_mf - 1):.3f} near zero):\n")
     w("| | " + " | ".join(f"{c} QE" for c in comp) + " |\n|---|" + "---|" * 6)

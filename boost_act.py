@@ -42,7 +42,7 @@ full-sky normalisations, and the mask is dealt with by simulation:
                    QE reconstructs the mask itself, so its mean field is
                    large (printed as |mean field| / |K u_in|); it is
                    subtracted.  On the full sky it is zero in expectation
-                   but still measured: its covariance weights the joint fit.
+                   but still measured: its scatter sets the joint weights.
     B  response    noise-free masked sims, each reconstructed once unboosted
                    and once boosted by +beta along x, y and z, with
                    aberration only and with modulation only (7
@@ -62,8 +62,13 @@ full-sky normalisations, and the mask is dealt with by simulation:
 
     separate   u_aber and u_mod solved from K together, so each is free of
                the other effect and they are not assumed equal
-    joint      one u for both effects (equal in these sims), weighted by the
-               covariance of the six estimator components
+    joint      one u for both effects (equal in these sims): per axis, a
+               weighted average of the separate aberration and modulation
+               estimates, w = s_mod^2 / (s_ab^2 + s_mod^2) on aberration,
+               with s the sd of that estimate over the mean-field sims.  Each
+               separate estimate is unbiased for the same u, so any weights
+               that sum to 1 are; these are the inverse-variance ones when
+               the two are uncorrelated.  The 6x6 covariance is not used.
 
 The error on a mean is sd / sqrt(n_data), the scatter of the data sims
 alone.  The Monte Carlo errors of the mean field and of K are shared by every
@@ -483,14 +488,22 @@ def higher_l(Y, own):
                 noise=cl_of(var_m))
 
 
-def linear_maps(K, C):
+def joint_weights(K, y_mf):
+    """Per-axis weight on the aberration estimate in the joint one,
+    w = s_mod^2 / (s_ab^2 + s_mod^2), where s is the sd over the mean-field
+    sims of that component of the separate estimates K^-1 y.  The modulation
+    estimate gets 1 - w."""
+    s = (y_mf @ np.linalg.inv(K).T).std(axis=0, ddof=1)    # u_ab xyz, u_mod xyz
+    return s[3:] ** 2 / (s[:3] ** 2 + s[3:] ** 2)
+
+
+def linear_maps(K, y_mf):
     """3x6 maps from the estimator vectors (mean field removed) to u: rows of
-    K^-1 for the separate estimates, and for the joint one the least-squares
-    fit of one u to both effects, weighted by the covariance C."""
+    K^-1 for the separate estimates, and for the joint one the weighted
+    average of the two separate estimates, [diag(w) diag(1-w)] K^-1."""
     Kinv = np.linalg.inv(K)
-    Kj = K[:, :3] + K[:, 3:]                   # one u drives both effects
-    G = np.linalg.solve(Kj.T @ np.linalg.solve(C, Kj),
-                        np.linalg.solve(C, Kj).T)
+    w = joint_weights(K, y_mf)
+    G = np.hstack([np.diag(w), np.diag(1 - w)]) @ Kinv
     return {"aberration": Kinv[:3], "modulation": Kinv[3:], "joint": G}
 
 
@@ -504,7 +517,7 @@ def solve(names, mf, diff, dat):
     Y, y_mf, y_dat, K, Kerr = system(names, mf, diff, dat)
     n_m = len(y_mf)
     m, C = y_mf.mean(axis=0), np.cov(y_mf, rowvar=False)
-    L = linear_maps(K, C)
+    L = linear_maps(K, y_mf)
     h = n_m // 2
     null_y = y_mf[h:] - y_mf[:h].mean(axis=0)     # split-half null test
     est = {}
@@ -525,6 +538,7 @@ def analyse(mf, diff, dat):
     # R^-1, K^-1, G and the eigenvalues of R; no estimate or error uses them.
     K_jk = [system((ABER_CASE, "MOD"), mf, np.delete(diff, k, axis=2), dat)[3]
             for k in range(diff.shape[2])]
+    y_mf = system((ABER_CASE, "MOD"), mf, diff, dat)[1]
     Kj = K[:, :3] + K[:, 3:]
     mf_ratio = np.array([np.linalg.norm(m[i:i + 3])
                          / np.linalg.norm(Kj[i:i + 3] @ U_TRUE) for i in (0, 3)])
@@ -537,6 +551,9 @@ def analyse(mf, diff, dat):
     print(f"   (MC error on the mean in units of 1e-3; b = {B_NU:.4f})")
     print(f"   |mean field| / |K u_in|:  {ABER_CASE} {mf_ratio[0]:.1f},  "
           f"MOD {mf_ratio[1]:.1f}")
+    w_joint = joint_weights(K, y_mf)
+    print("   joint weight on the aberration estimate x, y, z: "
+          + ", ".join(f"{w:.3f}" for w in w_joint))
 
     titles = {"aberration": "aberration (separate)",
               "modulation": "modulation (separate)",
@@ -549,12 +566,13 @@ def analyse(mf, diff, dat):
                          eig_err=np.sqrt((len(eig) - 1) * np.var(eig, axis=0)),
                          R_jk=np.array([Kk[blk] for Kk in K_jk]))
     sd = np.sqrt(np.diag(C))
-    # For the figures only: the copies of K, and the joint fit's linear map G
-    # with its copies, so the plots can show errors on R^-1, K^-1 and G.
+    # For the figures only: the copies of K, and the joint linear map G with
+    # its copies (weights recomputed for each), so the plots can show errors
+    # on R^-1, K^-1 and G.  C is kept for the correlation figure.
     out["system"] = dict(K=K, Kerr=Kerr, corr=C / np.outer(sd, sd),
                          mf_ratio=mf_ratio, K_jk=np.array(K_jk),
-                         G=linear_maps(K, C)["joint"],
-                         G_jk=np.array([linear_maps(Kk, C)["joint"]
+                         w_joint=w_joint, G=linear_maps(K, y_mf)["joint"],
+                         G_jk=np.array([linear_maps(Kk, y_mf)["joint"]
                                         for Kk in K_jk]))
 
     print("\nseparate aberration amplitude for each lensing combination")
