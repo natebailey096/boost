@@ -26,6 +26,12 @@ Each job makes and caches the sims i with i % nshards == shard.  When all
 have finished, run once more without --shard/--nshards: that run makes any
 sims still missing and writes the complete report and figures.
 
+Within one job, --nproc N makes N sims at a time in N worker processes (set
+OMP_NUM_THREADS = cpus / N, and allow memory for N sims).  The workers are
+started fresh ("spawn") and each repeats the set-up below once, because
+forked ones deadlock in OpenMP code after the set-up has used OpenMP.  It
+combines with --shard/--nshards.
+
 Estimators, each reduced to its L = 1 vector and scaled so that on the full
 sky, for its own effect, it estimates the boost vector u = beta * d:
     aberration  lensing QE, TT+TE+EE          phi = -u . n
@@ -90,6 +96,7 @@ CMB, homogeneous noise high-passed below LMIN.
 """
 
 import argparse
+import multiprocessing
 import os
 import time
 import warnings
@@ -108,7 +115,7 @@ parser.add_argument("--mask", default="dr6", choices=["none", "dr6"],
                     help="none: full sky.  dr6: the ACT DR6 lensing mask")
 parser.add_argument("--mask-file", default=os.path.basename(MASK_URL),
                     help="the DR6 healpix mask (--mask dr6 only)")
-parser.add_argument("--noise", default="f150", choices=["f150", "act"],
+parser.add_argument("--noise", default="f150", choices=["f150", "act", "none"],
                     help="white noise level in T: f150 is 24 uK-arcmin, act "
                          "is 14 uK-arcmin (P is sqrt2 x); the beam and the "
                          "1/f knees are the same")
@@ -117,6 +124,11 @@ parser.add_argument("--n-response", type=int, default=60)
 parser.add_argument("--n-data", type=int, default=400)
 parser.add_argument("--shard", type=int, default=0)
 parser.add_argument("--nshards", type=int, default=1)
+parser.add_argument("--nproc", type=int, default=1,
+                    help="sims made at the same time in this job, each in its "
+                         "own worker process; give each worker "
+                         "OMP_NUM_THREADS = (cpus for the job) / nproc, and "
+                         "memory for nproc sims at once")
 args = parser.parse_args()
 
 import healpy as hp                                            # noqa: E402
@@ -144,7 +156,7 @@ warnings.filterwarnings("ignore", message="The tweak argument is deprecated")
 LMIN, LMAX, MLMAX = 600, 3000, 3500
 LOUT = 5                                  # highest reconstruction L kept
 RES = 3.0 * utils.arcmin                  # fejer1 grid: exact SHTs to l = 3599
-NOISE_LEVELS = {"f150": 24.0, "act": 14.0}    # uK-arcmin in T (P is sqrt2 x)
+NOISE_LEVELS = {"f150": 24.0, "act": 14.0, "none": 0.0}    # uK-arcmin in T (P is sqrt2 x)
 NOISE_T = NOISE_LEVELS[args.noise]
 BEAM = 1.42                               # FWHM, arcmin
 TCMB, C_KMS = 2.7255e6, 299792.458        # uK, km/s
@@ -185,7 +197,9 @@ def _interpol_fixed(imap, pixs, epsilon=None, nthread=None, ydouble=False):
 aberration.interpol_map = _interpol_fixed
 
 # ---------------------------------------------------------------- spectra
-print("CAMB ...", flush=True)
+IN_WORKER = __name__ == "__mp_main__"       # a spawned --nproc worker
+if not IN_WORKER:
+    print("CAMB ...", flush=True)
 pars = camb.set_params(H0=67.5, ombh2=0.022, omch2=0.122, ns=0.965,
                        As=2.1e-9, tau=0.06)
 pars.set_for_lmax(MLMAX + 500)
@@ -263,7 +277,8 @@ def load_dr6_mask(path):
             f"{os.path.getsize(path)}_car{RES / utils.arcmin:g}.fits")
     car = os.path.join("cache_boost", "masks", name)
     if os.path.exists(car):
-        print(f"mask: {car}", flush=True)
+        if not IN_WORKER:
+            print(f"mask: {car}", flush=True)
         return enmap.enmap(np.asarray(enmap.read_map(car), np.float64), wcs)
     print(f"mask: {path} -> CAR ...", flush=True)
     hmask = np.clip(np.nan_to_num(hp.read_map(path, dtype=np.float32)), 0, 1)
@@ -350,28 +365,65 @@ STAGE = {"mf": "mf", "data": "data", BASE: "response",
 TODO = {}           # sims this run still has to make, per label (set in main)
 
 
-def run(label, n, one_sim):
+def one_sim(label, i):
+    """Reconstruction of sim i of one stage; the seeds follow the index.
+      mf          unboosted CMB + noise
+      unboosted   unboosted CMB, no noise (response)
+      <effect> <axis>  the same CMB boosted by +BETA along the axis, with
+                  aberration only or modulation only (response)
+      data        CMB with the full boost + noise"""
+    if label == "mf":
+        return reconstruct(cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i))
+    if label == BASE:
+        return reconstruct(cmb(2_000_000 + i))
+    if label == "data":
+        return reconstruct(boost(cmb(3_000_000 + 2 * i), BDIR, BETA)
+                           + noise(3_000_001 + 2 * i))
+    effect, axis = label.split()
+    return reconstruct(boost(cmb(2_000_000 + i), AXES["xyz".index(axis)], BETA,
+                             aberrate=effect == "aberration",
+                             modulate=effect == "modulation"))
+
+
+def make_and_cache(job):
+    """Make one sim and cache it, in this process or in a worker.  The file
+    is written under a temporary name and renamed, so no run ever reads one
+    half-written."""
+    label, i = job
+    path = cache_path(label, i)
+    tmp = f"{path}.{os.getpid()}.npy"
+    np.save(tmp, one_sim(label, i))
+    os.replace(tmp, path)
+    return i
+
+
+POOL = None         # the --nproc worker pool, made once per job in main()
+
+
+def run(label, n):
     """Make and cache this shard's sims out of 0..n-1 (all of them with
-    --nshards 1) that are not cached yet.  Each file is written under a
-    temporary name and renamed, so no run ever reads one half-written.
-    The time left assumes every remaining sim, of any stage, takes as long
-    as the average so far in this call."""
+    --nshards 1) that are not cached yet, --nproc at a time.  The time left
+    assumes every remaining sim, of any stage, takes as long (wall clock) as
+    the average so far in this call."""
+    jobs = [(label, i) for i in range(args.shard, n, args.nshards)
+            if not os.path.exists(cache_path(label, i))]
+    made = (POOL.imap_unordered(make_and_cache, jobs) if POOL
+            else map(make_and_cache, jobs))
     t0, done = time.time(), 0
-    for i in range(args.shard, n, args.nshards):
-        path = cache_path(label, i)
-        if os.path.exists(path):
-            continue
-        tmp = f"{path}.{os.getpid()}.npy"
-        np.save(tmp, one_sim(i))
-        os.replace(tmp, path)
-        done += 1
-        TODO[label] -= 1
-        rate = (time.time() - t0) / done
-        stage_left = sum(v for l, v in TODO.items() if STAGE[l] == STAGE[label])
-        print(f"   {label} {i + 1}/{n}   {rate:.1f} s/sim "
-              f"{rate * stage_left / 60:.1f} min left ({STAGE[label]}) "
-              f"{rate * sum(TODO.values()) / 60:.1f} min left (total)",
-              flush=True)
+    for i in made:
+        _report_progress(label, n, i, t0, done := done + 1)
+
+
+def _report_progress(label, n, i, t0, done):
+    """One progress line per finished sim; s/sim is wall clock, so with
+    several workers it is the time per sim of the whole job."""
+    TODO[label] -= 1
+    rate = (time.time() - t0) / done
+    stage_left = sum(v for l, v in TODO.items() if STAGE[l] == STAGE[label])
+    print(f"   {label} {i + 1}/{n}   {rate:.1f} s/sim "
+          f"{rate * stage_left / 60:.1f} min left ({STAGE[label]}) "
+          f"{rate * sum(TODO.values()) / 60:.1f} min left (total)",
+          flush=True)
 
 
 def collect(labels, n):
@@ -609,22 +661,26 @@ def main():
                  for l, n in counts.items()})
     print(f"this run makes {sum(TODO.values())} sims; the rest are cached "
           f"or belong to other shards")
-    print("\n[A] mean field")
-    run("mf", args.n_meanfield, lambda i: reconstruct(
-        cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i)))
-
-    print("\n[B] response")
-    run(BASE, args.n_response, lambda i: reconstruct(cmb(2_000_000 + i)))
-    for k, effect in enumerate(EFFECTS):
-        for j, d in enumerate(AXES):
-            run(f"{effect} {'xyz'[j]}", args.n_response,
-                lambda i: reconstruct(boost(
-                    cmb(2_000_000 + i), d, BETA,
-                    aberrate=k == 0, modulate=k == 1)))
-
-    print("\n[C] data")
-    run("data", args.n_data, lambda i: reconstruct(
-        boost(cmb(3_000_000 + 2 * i), BDIR, BETA) + noise(3_000_001 + 2 * i)))
+    cores = (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
+             else os.cpu_count())
+    print(f"{args.nproc} worker process(es), OMP_NUM_THREADS="
+          f"{os.environ.get('OMP_NUM_THREADS', 'unset')} each; "
+          f"{cores} cores available to this job", flush=True)
+    global POOL
+    if args.nproc > 1 and sum(TODO.values()):
+        POOL = multiprocessing.get_context("spawn").Pool(args.nproc)
+    try:
+        print("\n[A] mean field")
+        run("mf", args.n_meanfield)
+        print("\n[B] response")
+        for label in [BASE] + RESP_LABELS:
+            run(label, args.n_response)
+        print("\n[C] data")
+        run("data", args.n_data)
+    finally:
+        if POOL:
+            POOL.terminate()
+            POOL = None
 
     # Report on everything cached so far, whichever shard made it.
     mf = collect(["mf"], args.n_meanfield)[0]

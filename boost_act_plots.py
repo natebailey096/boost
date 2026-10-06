@@ -183,32 +183,56 @@ def plot_noise(S, path):
     plt.close(fig)
 
 
+def per_sim_K(S):
+    """Each response sim's own 6x6 response, recovered exactly from the mean
+    K and its leave-one-out copies: K_i = n K - (n - 1) K_jk[i]."""
+    n = len(S["K_jk"])
+    return n * S["K"][None] - (n - 1) * np.asarray(S["K_jk"])
+
+
 def plot_response_6x6(S, path):
     """K per unit boost (rows: the six estimator components, columns: the
-    six boosts), and the correlation of the six components over the
-    mean-field sims.  Off-diagonal blocks are each QE's response to the
-    other effect."""
+    six boosts) and its inverse, which the separate estimates apply.  K's
+    errors are the sd of each element over the response sims divided by
+    sqrt(n_r); K^-1's are the same for the inverse of each response sim's
+    own K, which keeps the correlations between K's elements.  Off-diagonal
+    blocks of K are each estimator's response to the other effect."""
     labels = ["aber x", "aber y", "aber z", "mod x", "mod y", "mod z"]
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), layout="constrained")
-    for ax, M, title, v in ((axes[0], S["K"], "response $K$ per unit boost",
-                             np.abs(S["K"]).max()),
-                            (axes[1], S["corr"], "correlation of the estimator "
-                             "components (mean-field sims)", 1.0)):
+    Kinv, Kinv_err, n_r = np.linalg.inv(S["K"]), None, None
+    if "K_jk" in S:
+        try:
+            inv_i = np.linalg.inv(per_sim_K(S))
+            n_r = len(inv_i)
+            Kinv_err = inv_i.std(axis=0, ddof=1) / np.sqrt(n_r)
+        except np.linalg.LinAlgError:          # a singular single-sim K
+            pass
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6.4), layout="constrained")
+    for ax, M, E, title in ((axes[0], S["K"], S["Kerr"],
+                             "response $K$ per unit boost"),
+                            (axes[1], Kinv, Kinv_err, "$K^{-1}$")):
+        v = np.abs(M).max()
         im = ax.imshow(M, cmap="RdBu_r", vmin=-v, vmax=v)
         for i in range(6):
             for j in range(6):
-                txt = pm(M[i, j], S["Kerr"][i, j] if M is S["K"] else None)
+                txt = pm(M[i, j], None if E is None else E[i, j])
                 ax.text(j, i, txt, ha="center", va="center", fontsize=8)
         ax.axhline(2.5, color="k", lw=1.5)
         ax.axvline(2.5, color="k", lw=1.5)
         ax.set_yticks(range(6), labels)
         ax.set_xticks(range(6), labels, rotation=45)
-        ax.set_ylabel("estimator component")
+        # K maps a boost to estimator components; K^-1 the other way.
+        ax.set_ylabel("estimator component" if M is S["K"]
+                      else "boost: effect and axis")
+        ax.set_xlabel("boost: effect and axis" if M is S["K"]
+                      else "estimator component")
         ax.set_title(title)
         ax.grid(False)
         fig.colorbar(im, ax=ax, fraction=0.046)
-    axes[0].set_xlabel("boost: effect and axis")
-    axes[1].set_xlabel("estimator component")
+    fig.supxlabel(
+        (f"± sd over the {n_r} response sims / $\\sqrt{{{n_r}}}$: for $K$ of "
+         "each element, for $K^{-1}$ of the inverse of each sim's own $K$"
+         if Kinv_err is not None else
+         "$K$: ± sd / √n over the response sims.  " + NO_JK), fontsize=8.5)
     fig.savefig(path)
     plt.close(fig)
 
@@ -608,7 +632,7 @@ def write_report(summary, path):
     w("- Correlation coefficients r: approximate standard error "
       "(1 − r²)/√(N − 1).")
 
-    w("\n## Response and correlations (`response_6x6.png`)\n")
+    w("\n## Response (`response_6x6.png`) and correlations\n")
     w("K per unit boost, mean ± error on the mean.  Rows: estimator "
       "components.  Columns: boost effect and axis.\n")
     w("| | " + " | ".join(comp) + " |\n|---|" + "---|" * 6)
