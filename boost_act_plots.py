@@ -405,10 +405,31 @@ def plot_inverse_response(S, path):
     plt.close(fig)
 
 
+def mean_direction(S):
+    """Galactic (l, b) of the mean velocity over the data sims, with its
+    error, and its angle from the input.  The error on the mean vector,
+    cov(v) / n_data, is carried to (l, b) by drawing from it.  Unlike the
+    mean of the per-sim l and b, this is not pulled away from the input when
+    single sims are noisy.  l is unwrapped around the input."""
+    vel = S["vel"]
+    vbar = vel.mean(axis=0)
+    l_in = lonlat(S["d_true"] @ EQU2GAL.T)[0]
+    lv, bv = lonlat(vbar @ EQU2GAL.T)
+    lv = l_in + (lv - l_in + 180) % 360 - 180
+    draws = np.random.default_rng(0).multivariate_normal(
+        vbar, np.cov(vel, rowvar=False) / len(vel), 20000)
+    ld, bd = lonlat(draws @ EQU2GAL.T)
+    ld = lv + (ld - lv + 180) % 360 - 180
+    angle = np.degrees(np.arccos(np.clip(
+        vbar @ S["d_true"] / np.linalg.norm(vbar), -1, 1)))
+    return lv, bv, ld.std(ddof=1), bd.std(ddof=1), angle
+
+
 def plot_amplitude_direction(S, path):
     """Amplitude A, and the recovered directions in galactic coordinates:
-    per-sim directions with 1 and 2 sd ellipses, their mean, and the
-    input; the text box gives the mean and sd in l and b."""
+    per-sim directions with 1 and 2 sd ellipses, their mean, the direction
+    of the mean velocity with its error, and the input; the text box gives
+    the numbers."""
     amp = S["amp"]
     col = COLOURS[S["name"]]
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.8),
@@ -436,7 +457,12 @@ def plot_amplitude_direction(S, path):
     ax1.scatter(l, b, s=14, color=col, alpha=0.55, lw=0, label="per sim")
     for ns in (1, 2):
         ellipse(ax1, (lm, bm), np.cov(l, b), ns, color=col, ls="--", lw=1)
-    ax1.plot(lm, bm, "o", ms=8, color=col, mec=INK, zorder=5, label="mean")
+    ax1.plot(lm, bm, "o", ms=8, color=col, mec=INK, zorder=5,
+             label="mean of per-sim directions")
+    lv, bv, elv, ebv, angle = mean_direction(S)
+    ax1.errorbar(lv, bv, xerr=elv, yerr=ebv, fmt="D", ms=7, color=INK,
+                 mfc="white", capsize=3, zorder=7,
+                 label="mean velocity ± error")
     ax1.plot(l_in, b_in, "*", ms=16, color=TRUTH, zorder=6, label="input")
     ax1.invert_xaxis()
     ax1.set_aspect(1 / np.cos(np.radians(b_in)), adjustable="datalim")
@@ -444,8 +470,11 @@ def plot_amplitude_direction(S, path):
     ax1.set_ylabel(r"galactic latitude $b$ [deg]")
     ax1.text(0.03, 0.03,
              f"input   $\\ell$ = {l_in:.2f}°,  $b$ = {b_in:+.2f}°\n"
-             f"mean   $\\ell$ = {lm:.2f}°,  $b$ = {bm:+.2f}°\n"
-             f"sd       $\\sigma_\\ell$ = {sl:.2f}°,  $\\sigma_b$ = {sb:.2f}°",
+             f"mean of sims   $\\ell$ = {lm:.2f}°,  $b$ = {bm:+.2f}°\n"
+             f"sd       $\\sigma_\\ell$ = {sl:.2f}°,  $\\sigma_b$ = {sb:.2f}°\n"
+             f"mean velocity   $\\ell$ = {lv:.2f} $\\pm$ {elv:.2f}°,  "
+             f"$b$ = {bv:+.2f} $\\pm$ {ebv:.2f}°  "
+             f"({angle:.2f}° from input)",
              transform=ax1.transAxes, fontsize=9, va="bottom",
              bbox=dict(fc="white", ec="0.8", alpha=0.9))
     ax1.legend(fontsize=9, loc="upper right")
