@@ -4,11 +4,13 @@ matplotlib only, so they can be redrawn without rerunning anything).
 
     python boost_act_plots.py cache_boost/<mask>_<noise>/summary.npz
 
-    plots/             coverage, noise, response_6x6 (K and the correlation
-                       of the six estimator components), comparison (A from
-                       the three estimates, and aberration against modulation)
-    plots/aberration/  lensing QE, solved without assuming the modulation
-    plots/modulation/  modulation QE, solved without assuming the aberration
+    plots/             coverage, noise, response_6x6 (K and K^-1),
+                       comparison (A from the three estimates, and
+                       aberration against modulation)
+    plots/aberration/  lensing QE, solved without assuming the modulation;
+                       unhardened shows the bias of R^-1 alone
+    plots/modulation/  modulation QE, solved without assuming the aberration;
+                       unhardened likewise
     plots/joint/       one velocity for both effects; inverse_response is
                        K^-1 (what the separate estimates apply) and the
                        joint map G (the weighted average of the two
@@ -34,6 +36,7 @@ from matplotlib.patches import Ellipse, Rectangle
 
 COR, TRUTH, RAW, INK = "#0072B2", "#C02A2A", "#E69F00", "#1A1A1A"
 COLOURS = {"aberration": COR, "modulation": RAW, "joint": "#009E73"}
+UNHARD = "#CC79A7"          # an estimate corrected with its own R alone
 TITLES = {"aberration": "Aberration", "modulation": "Modulation",
           "joint": "Boost"}
 plt.rcParams.update({"font.size": 11, "axes.grid": True, "grid.alpha": 0.2,
@@ -293,6 +296,94 @@ def plot_whisker(S, path):
     ax1.set_xticks(range(3), ["$v_x$", "$v_y$", "$v_z$"])
     fig.savefig(path)
     plt.close(fig)
+
+
+def unhardened(S):
+    """Per-sim velocities [km/s] of one estimate corrected with its own
+    3x3 block R of K alone, as a single-effect analysis would, instead of
+    K^-1 for both; and the bias this predicts.  Exact from the hardened
+    estimates, which the summary holds: y - y_MF = K (u_ab, u_mod), so
+    R^-1 (y - y_MF)_own = u_own + R^-1 K_x u_other, where K_x is the block
+    of K coupling this estimator to the other effect.  The other estimate
+    averages to v_in, so the bias is R^-1 K_x v_in.  S is load(summary,
+    name) plus vel_other (the other estimate's vel) and K_full (system.K)."""
+    own, oth = ((slice(0, 3), slice(3, 6)) if S["name"] == "aberration"
+                else (slice(3, 6), slice(0, 3)))
+    K = S["K_full"]
+    leak = np.linalg.solve(K[own, own], K[own, oth])
+    return S["vel"] + S["vel_other"] @ leak.T, leak @ S["v_true"]
+
+
+def plot_unhardened(S, path):
+    """The estimate with and without hardening.  Left: A from each, with
+    the input and the A the leak predicts.  Middle: mean minus input per
+    component, with its error on the mean.  Right: the leak itself, not
+    hardened minus hardened sim by sim, which removes the noise the two
+    share, against the leak K predicts."""
+    v_in, v_h = S["v_true"], S["vel"]
+    v_u, bias = unhardened(S)
+    vv, n = v_in @ v_in, len(v_h)
+    A_h, A_u = v_h @ v_in / vv, v_u @ v_in / vv
+    dA = A_u - A_h
+    col = COLOURS[S["name"]]
+    lab_h, lab_u = r"hardened, $K^{-1}$", r"not hardened, $R^{-1}$"
+    lab_p = r"predicted, $R^{-1}K_\times v_{\rm in}$"
+    sem = lambda a: a.std(axis=0, ddof=1) / np.sqrt(n)
+    fig, (ax0, ax1, ax2) = plt.subplots(
+        1, 3, figsize=(16, 4.8), layout="constrained",
+        gridspec_kw=dict(width_ratios=[1.25, 1, 1]))
+
+    bins = np.histogram_bin_edges(np.r_[A_h, A_u], 40)
+    for A, c, lab, kw in ((A_h, col, lab_h,
+                           dict(histtype="stepfilled", alpha=0.45)),
+                          (A_u, UNHARD, lab_u, dict(histtype="step", lw=2))):
+        ax0.hist(A, bins, color=c, label=f"{lab}:  {A.mean():+.3f} $\\pm$ "
+                 f"{sem(A):.3f}", **kw)
+    ax0.axvline(1, color=TRUTH, lw=2, label="input")
+    ax0.axvline(1 + bias @ v_in / vv, color=UNHARD, ls="--", lw=1.5,
+                label=f"predicted, not hardened:  {1 + bias @ v_in / vv:+.3f}")
+    ax0.plot([], [], " ", label=f"difference, sim by sim:  {dA.mean():+.3f} "
+             f"$\\pm$ {sem(dA):.3f}")
+    ax0.set_xlabel("amplitude $A$")
+    ax0.set_ylabel("sims")
+    ax0.set_title("amplitude")
+    ax0.legend(fontsize=8.5, loc="upper left")
+
+    x = np.arange(3)
+    ax1.axhline(0, color=TRUTH, lw=1.5, label="input")
+    for v, dx, fmt, c, lab in ((v_h, -0.12, "o", col, lab_h),
+                               (v_u, 0.12, "s", UNHARD, lab_u)):
+        ax1.errorbar(x + dx, v.mean(axis=0) - v_in, yerr=sem(v), fmt=fmt,
+                     ms=8, color=c, capsize=4, label=lab)
+    ax1.plot(x + 0.12, bias, "_", ms=24, mew=2, color=INK, label=lab_p)
+    ax1.set_ylabel("mean − input [km/s]")
+    ax1.set_title("bias against the input")
+    ax1.legend(fontsize=8.5)
+
+    ax2.axhline(0, color=INK, lw=0.8)
+    ax2.errorbar(x, (v_u - v_h).mean(axis=0), yerr=sem(v_u - v_h), fmt="s",
+                 ms=8, color=UNHARD, capsize=4,
+                 label="not hardened − hardened, sim by sim")
+    ax2.plot(x, bias, "_", ms=24, mew=2, color=INK, label=lab_p)
+    ax2.set_ylabel("leak [km/s]")
+    ax2.set_title("leak of the other effect")
+    ax2.legend(fontsize=8.5)
+    for ax in (ax1, ax2):
+        ax.set_xticks(x, ["$v_x$", "$v_y$", "$v_z$"])
+    fig.suptitle(f"{TITLES[S['name']]}: with and without hardening")
+    fig.supxlabel(f"error bars and ±: error on the mean, sd / √{n} over the "
+                  "data sims", fontsize=8.5)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def with_other(summary, name):
+    """load(summary, name) plus what unhardened() needs."""
+    S = load(summary, name)
+    other = "modulation" if name == "aberration" else "aberration"
+    S.update(vel_other=load(summary, other)["vel"],
+             K_full=load(summary, "system")["K"])
+    return S
 
 
 def plot_planes(S, path):
@@ -757,6 +848,30 @@ def write_report(summary, path):
             w(f"| {l}, {m:+d} | " + " | ".join(
                 f"{V[i, j]:+.2e} ± {err[i, j]:.0e}" for j in range(3)) + " |")
 
+    w("\n## Without hardening (`aberration/unhardened.png`, "
+      "`modulation/unhardened.png`)\n")
+    w("Each estimate corrected with its own 3×3 block R of K alone, as a "
+      "single-effect analysis would, instead of K⁻¹ for both.  The other "
+      "effect then leaks in, on average R⁻¹ K× v_in, where K× is the block of "
+      "K coupling the estimator to the other effect.  These are computed "
+      "exactly from the hardened estimates (y − y_MF = K (u_ab, u_mod), so R⁻¹ "
+      "applied to one estimator's three components is that estimate plus "
+      "R⁻¹ K× times the other's), not from new simulations.  The two are "
+      "from the same sims, so their difference, sim by sim, is far less noisy "
+      "than either.\n")
+    w("| estimate | A hardened | A not hardened | difference, sim by sim "
+      "| difference predicted |\n|---|---|---|---|---|")
+    for name in ("aberration", "modulation"):
+        Sx = with_other(summary, name)
+        v_u, bias = unhardened(Sx)
+        A_h = Sx["vel"] @ v_in / (v_in @ v_in)
+        A_u = v_u @ v_in / (v_in @ v_in)
+        w(f"| {TITLES[name]} | {A_h.mean():+.4f} ± "
+          f"{A_h.std(ddof=1) / np.sqrt(n_d):.4f} | {A_u.mean():+.4f} ± "
+          f"{A_u.std(ddof=1) / np.sqrt(n_d):.4f} | {(A_u - A_h).mean():+.4f} "
+          f"± {(A_u - A_h).std(ddof=1) / np.sqrt(n_d):.4f} | "
+          f"{bias @ v_in / (v_in @ v_in):+.4f} |")
+
     w("\n## Aberration amplitude for each lensing combination\n")
     w("The separate aberration estimate (solved with the modulation "
       "estimator) for each choice of lensing estimators.\n")
@@ -800,6 +915,9 @@ def make_all(summary, outdir=None):
         S = load(summary, name)
         for fn in fns:
             save(fn, S, os.path.join(folder, fn.__name__[5:] + ".png"))
+    for name in ("aberration", "modulation"):
+        save(plot_unhardened, with_other(summary, name),
+             os.path.join(outdir, name, "unhardened.png"))
     save(plot_comparison, [load(summary, n) for n in TITLES],
          os.path.join(outdir, "comparison.png"))
     write_report(summary, os.path.join(outdir, "report.md"))
