@@ -8,7 +8,9 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        comparison (A from the three estimates, and
                        aberration against modulation)
     plots/aberration/  lensing QE, solved without assuming the modulation;
-                       unhardened shows the bias of R^-1 alone
+                       unhardened shows the bias of R^-1 alone;
+                       meanfield_map shows its reconstruction on the sky
+                       with no boost (mean field, and one sim)
     plots/modulation/  modulation QE, solved without assuming the aberration;
                        unhardened likewise
     plots/joint/       one velocity for both effects; inverse_response is
@@ -107,6 +109,17 @@ NO_JK = ("errors on the inverses need the jackknife copies of K, which this "
          "with the same options; it reuses the cached sims and makes none")
 
 
+def expected(S):
+    """What one estimate should average to: its velocity [km/s], its A,
+    and a label.  For the full boost that is the input.  With --boost
+    aberration or modulation it is the applied effect's share: the input
+    or 0 for the separate estimates, the weighted part of it for the joint
+    one.  Summaries from before --boost were all full boost."""
+    if str(S.get("boost", "full")) != "full" and "v_expect" in S:
+        return np.asarray(S["v_expect"]), float(S["A_expect"]), "expected"
+    return np.asarray(S["v_true"]), 1.0, "input"
+
+
 def load(path, name=None):
     """Shared entries of summary.npz, plus those of one estimate
     (aberration, modulation, joint or system) with the prefix dropped."""
@@ -158,6 +171,58 @@ def plot_coverage(S, path):
                  label="mask weight")
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.5), ncol=3,
               fontsize=9)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_meanfield_map(S, path):
+    """What this estimator reconstructs on the sky at L <= LOUT, in km/s
+    (at L = 1, c u.n), with no boost applied: the mean over the masked,
+    unboosted mean-field sims (the mean field), and one of those sims on its
+    own.  The bottom map is the signal of the applied boost, from the
+    response sims, for scale.  Each map has its own symmetric colour scale;
+    the mask's edge (weight 0.5) is outlined."""
+    def x_of(ra):                       # RA increasing to the left
+        return -np.radians((np.asarray(ra) - 180 + 180) % 360 - 180)
+
+    ra, dec = S["map_ra"], S["map_dec"]
+    order = np.argsort(x_of(ra))
+    xs, ys = x_of(ra)[order], np.radians(dec)
+    lout = int(S["pack_l"].max())
+    panels = [(S["mf_map"], f"mean field: mean of {int(S['n_mf'])} masked, "
+               "unboosted sims"),
+              (S["sim_map"], "one masked, unboosted sim"),
+              (S["signal_map"], "signal of the applied boost "
+               "(response sims), for scale")]
+    fig = plt.figure(figsize=(8.5, 13), layout="constrained")
+    ra_d, dec_d = lonlat(S["d_true"])
+    for k, (M, title) in enumerate(panels):
+        ax = fig.add_subplot(3, 1, k + 1, projection="mollweide")
+        M = np.asarray(M)[:, order]
+        rms = np.sqrt(np.mean(M ** 2))
+        unit = 1e3 if np.abs(M).max() > 5e3 else 1.0       # tidy colour bar
+        M = M / unit
+        v = np.abs(M).max()
+        pcm = ax.pcolormesh(xs, ys, M, cmap="RdBu_r", vmin=-v, vmax=v,
+                            shading="auto", rasterized=True)
+        if "mask_thumb" in S:
+            mo = np.argsort(x_of(S["mask_ra"]))
+            ax.contour(x_of(S["mask_ra"])[mo], np.radians(S["mask_dec"]),
+                       S["mask_thumb"][:, mo], levels=[0.5], colors=INK,
+                       linewidths=1)
+        ax.plot(x_of(ra_d), np.radians(dec_d), "*", ms=14, mfc="gold",
+                mec=INK, label="input direction")
+        xt = np.radians(np.arange(-150, 151, 30))
+        ax.set_xticks(xt, [f"{(180 - d) % 360:.0f}" for d in np.degrees(xt)],
+                      fontsize=7)
+        ax.tick_params(axis="y", labelsize=7)
+        ax.set_title(f"{title}\nrms {rms:.0f} km/s", fontsize=10)
+        cb = fig.colorbar(pcm, ax=ax, orientation="horizontal", shrink=0.5,
+                          pad=0.04, label="10³ km/s" if unit > 1 else "km/s")
+        cb.ax.locator_params(nbins=5)
+    ax.legend(loc="lower right", fontsize=8)
+    fig.suptitle(f"{TITLES[S['name']]} estimator: reconstruction, "
+                 f"L = 1–{lout}", fontsize=12)
     fig.savefig(path)
     plt.close(fig)
 
@@ -240,28 +305,40 @@ def plot_response_6x6(S, path):
     plt.close(fig)
 
 
+VPAR = (r"velocity along the input direction, "
+        r"$v_\parallel = \mathbf{v}\cdot\hat{\mathbf{v}}_{\rm in}$ [km/s]")
+
+
 def plot_comparison(S3, path):
     """A from the three estimates, and aberration against modulation sim by
     sim: the more correlated they are, the less combining them gains."""
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.6),
                                    layout="constrained")
-    allamp = np.concatenate([S["amp"] for S in S3])
+    vin = np.linalg.norm(S3[0]["v_true"])       # A x |v_in| = v . v_in-hat
+    allamp = np.concatenate([S["amp"] for S in S3]) * vin
     bins = np.linspace(*np.percentile(allamp, [0.5, 99.5]), 40)
     for S in S3:
-        a = S["amp"]
+        a = S["amp"] * vin
         ax0.hist(a, bins=bins, histtype="step", lw=1.8,
                  color=COLOURS[S["name"]],
-                 label=f"{TITLES[S['name']]}: {a.mean():+.3f} $\\pm$ "
-                       f"{a.std(ddof=1):.3f} (sd)")
-    ax0.axvline(1.0, color=TRUTH, lw=2, label="input")
-    ax0.set_xlabel("amplitude $A$")
+                 label=f"{TITLES[S['name']]}: {a.mean():+.0f} $\\pm$ "
+                       f"{a.std(ddof=1):.0f} km/s (sd)")
+    exp = [expected(S) for S in S3]
+    if all(word == "input" for _, _, word in exp):
+        ax0.axvline(vin, color=TRUTH, lw=2, label=f"input: {vin:.0f} km/s")
+    else:
+        for S, (_, A_e, _) in zip(S3, exp):
+            ax0.axvline(A_e * vin, color=COLOURS[S["name"]], ls="--", lw=1.8,
+                        label=f"expected, {TITLES[S['name']]}: "
+                              f"{A_e * vin:.0f} km/s")
+    ax0.set_xlabel(VPAR)
     ax0.set_ylabel("sims")
-    ax0.legend(fontsize=9)
-    a, m = S3[0]["amp"], S3[1]["amp"]
+    ax0.legend(fontsize=9, frameon=True, framealpha=0.9, edgecolor="none")
+    a, m = S3[0]["amp"] * vin, S3[1]["amp"] * vin
     ax1.scatter(a, m, s=8, color=INK, alpha=0.4, lw=0)
-    ax1.plot(1, 1, "*", ms=16, color=TRUTH)
-    ax1.set_xlabel("$A$ aberration")
-    ax1.set_ylabel("$A$ modulation")
+    ax1.plot(exp[0][1] * vin, exp[1][1] * vin, "*", ms=16, color=TRUTH)
+    ax1.set_xlabel(r"aberration $v_\parallel$ [km/s]")
+    ax1.set_ylabel(r"modulation $v_\parallel$ [km/s]")
     ax1.set_title(f"correlation {np.corrcoef(a, m)[0, 1]:+.2f}")
     fig.savefig(path)
     plt.close(fig)
@@ -269,9 +346,10 @@ def plot_comparison(S3, path):
 
 def plot_whisker(S, path):
     """v_x, v_y, v_z: mean +- 1 sd boxes, +- 2 sd whiskers.  Below, the
-    mean minus the input with its error on the mean, sd / sqrt(n_data)
-    over the data sims."""
-    vel, v_true = S["vel"], S["v_true"]
+    mean minus the input (or, with --boost, the expected value) with its
+    error on the mean, sd / sqrt(n_data) over the data sims."""
+    vel = S["vel"]
+    v_true, _, word = expected(S)
     m, sd = vel.mean(axis=0), vel.std(axis=0, ddof=1)
     err = S["stat_err"][1:4]
     stats = [dict(med=m[k], q1=m[k] - sd[k], q3=m[k] + sd[k],
@@ -285,7 +363,7 @@ def plot_whisker(S, path):
     for b in bp["boxes"]:
         b.set(facecolor=col, alpha=0.5, edgecolor=col)
     ax0.hlines(v_true, np.arange(3) - 0.35, np.arange(3) + 0.35, color=TRUTH,
-               lw=2, label="input", zorder=5)
+               lw=2, label=word, zorder=5)
     ax0.set_ylabel("velocity [km/s]")
     ax0.set_title(TITLES[S["name"]])
     ax0.legend(loc="upper left")
@@ -301,78 +379,45 @@ def plot_whisker(S, path):
 def unhardened(S):
     """Per-sim velocities [km/s] of one estimate corrected with its own
     3x3 block R of K alone, as a single-effect analysis would, instead of
-    K^-1 for both; and the bias this predicts.  Exact from the hardened
-    estimates, which the summary holds: y - y_MF = K (u_ab, u_mod), so
-    R^-1 (y - y_MF)_own = u_own + R^-1 K_x u_other, where K_x is the block
-    of K coupling this estimator to the other effect.  The other estimate
-    averages to v_in, so the bias is R^-1 K_x v_in.  S is load(summary,
-    name) plus vel_other (the other estimate's vel) and K_full (system.K)."""
+    K^-1 for both.  Exact from the hardened estimates, which the summary
+    holds: y - y_MF = K (u_ab, u_mod), so R^-1 (y - y_MF)_own = u_own +
+    R^-1 K_x u_other, where K_x is the block of K coupling this estimator
+    to the other effect.  S is load(summary, name) plus vel_other (the
+    other estimate's vel) and K_full (system.K)."""
     own, oth = ((slice(0, 3), slice(3, 6)) if S["name"] == "aberration"
                 else (slice(3, 6), slice(0, 3)))
     K = S["K_full"]
     leak = np.linalg.solve(K[own, own], K[own, oth])
-    return S["vel"] + S["vel_other"] @ leak.T, leak @ S["v_true"]
+    return S["vel"] + S["vel_other"] @ leak.T
 
 
 def plot_unhardened(S, path):
-    """The estimate with and without hardening.  Left: A from each, with
-    the input and the A the leak predicts.  Middle: mean minus input per
-    component, with its error on the mean.  Right: the leak itself, not
-    hardened minus hardened sim by sim, which removes the noise the two
-    share, against the leak K predicts."""
+    """A of the estimate with hardening (K^-1) and without (its own R alone),
+    with the input, or with --boost the value it should have."""
     v_in, v_h = S["v_true"], S["vel"]
-    v_u, bias = unhardened(S)
+    v_u = unhardened(S)
     vv, n = v_in @ v_in, len(v_h)
-    A_h, A_u = v_h @ v_in / vv, v_u @ v_in / vv
-    dA = A_u - A_h
+    A_e, word = expected(S)[1:]
     col = COLOURS[S["name"]]
-    lab_h, lab_u = r"hardened, $K^{-1}$", r"not hardened, $R^{-1}$"
-    lab_p = r"predicted, $R^{-1}K_\times v_{\rm in}$"
-    sem = lambda a: a.std(axis=0, ddof=1) / np.sqrt(n)
-    fig, (ax0, ax1, ax2) = plt.subplots(
-        1, 3, figsize=(16, 4.8), layout="constrained",
-        gridspec_kw=dict(width_ratios=[1.25, 1, 1]))
-
+    fig, ax = plt.subplots(figsize=(7.5, 4.6), layout="constrained")
+    vin = np.sqrt(vv)                          # in km/s: A x |v_in|
+    A_h, A_u = v_h @ v_in / vin, v_u @ v_in / vin
+    A_e = A_e * vin
     bins = np.histogram_bin_edges(np.r_[A_h, A_u], 40)
-    for A, c, lab, kw in ((A_h, col, lab_h,
+    for A, c, lab, kw in ((A_h, col, r"hardened, $K^{-1}$",
                            dict(histtype="stepfilled", alpha=0.45)),
-                          (A_u, UNHARD, lab_u, dict(histtype="step", lw=2))):
-        ax0.hist(A, bins, color=c, label=f"{lab}:  {A.mean():+.3f} $\\pm$ "
-                 f"{sem(A):.3f}", **kw)
-    ax0.axvline(1, color=TRUTH, lw=2, label="input")
-    ax0.axvline(1 + bias @ v_in / vv, color=UNHARD, ls="--", lw=1.5,
-                label=f"predicted, not hardened:  {1 + bias @ v_in / vv:+.3f}")
-    ax0.plot([], [], " ", label=f"difference, sim by sim:  {dA.mean():+.3f} "
-             f"$\\pm$ {sem(dA):.3f}")
-    ax0.set_xlabel("amplitude $A$")
-    ax0.set_ylabel("sims")
-    ax0.set_title("amplitude")
-    ax0.legend(fontsize=8.5, loc="upper left")
-
-    x = np.arange(3)
-    ax1.axhline(0, color=TRUTH, lw=1.5, label="input")
-    for v, dx, fmt, c, lab in ((v_h, -0.12, "o", col, lab_h),
-                               (v_u, 0.12, "s", UNHARD, lab_u)):
-        ax1.errorbar(x + dx, v.mean(axis=0) - v_in, yerr=sem(v), fmt=fmt,
-                     ms=8, color=c, capsize=4, label=lab)
-    ax1.plot(x + 0.12, bias, "_", ms=24, mew=2, color=INK, label=lab_p)
-    ax1.set_ylabel("mean − input [km/s]")
-    ax1.set_title("bias against the input")
-    ax1.legend(fontsize=8.5)
-
-    ax2.axhline(0, color=INK, lw=0.8)
-    ax2.errorbar(x, (v_u - v_h).mean(axis=0), yerr=sem(v_u - v_h), fmt="s",
-                 ms=8, color=UNHARD, capsize=4,
-                 label="not hardened − hardened, sim by sim")
-    ax2.plot(x, bias, "_", ms=24, mew=2, color=INK, label=lab_p)
-    ax2.set_ylabel("leak [km/s]")
-    ax2.set_title("leak of the other effect")
-    ax2.legend(fontsize=8.5)
-    for ax in (ax1, ax2):
-        ax.set_xticks(x, ["$v_x$", "$v_y$", "$v_z$"])
-    fig.suptitle(f"{TITLES[S['name']]}: with and without hardening")
-    fig.supxlabel(f"error bars and ±: error on the mean, sd / √{n} over the "
-                  "data sims", fontsize=8.5)
+                          (A_u, UNHARD, r"not hardened, $R^{-1}$",
+                           dict(histtype="step", lw=2))):
+        ax.hist(A, bins, color=c, label=f"{lab}:  {A.mean():+.1f} $\\pm$ "
+                f"{A.std(ddof=1) / np.sqrt(n):.1f} km/s", **kw)
+    ax.axvline(A_e, color=TRUTH, lw=2, label=f"{word}: {A_e:.0f} km/s")
+    ax.set_xlabel(VPAR)
+    ax.set_ylabel("sims")
+    ax.set_title(f"{TITLES[S['name']]}: with and without hardening")
+    ax.legend(fontsize=9, loc="upper left", frameon=True, framealpha=0.9,
+              edgecolor="none")
+    fig.supxlabel(f"±: error on the mean, sd / √{n} over the data sims",
+                  fontsize=8.5)
     fig.savefig(path)
     plt.close(fig)
 
@@ -388,7 +433,8 @@ def with_other(summary, name):
 
 def plot_planes(S, path):
     """The sims in the xy, xz, yz planes with 1 and 2 sd ellipses."""
-    vel, v_true = S["vel"], S["v_true"]
+    vel = S["vel"]
+    v_true, _, word = expected(S)
     col = COLOURS[S["name"]]
     fig, axes = plt.subplots(1, 3, figsize=(13, 4.6), layout="constrained")
     for ax, (i, j) in zip(axes, [(0, 1), (0, 2), (1, 2)]):
@@ -397,7 +443,7 @@ def plot_planes(S, path):
         for ns in (1, 2):
             ellipse(ax, mu, np.cov(vel[:, [i, j]].T), ns, color=col, lw=1.5)
         ax.plot(*mu, "o", color=col, mec=INK, label="mean of sims")
-        ax.plot(v_true[i], v_true[j], "*", ms=16, color=TRUTH, label="input")
+        ax.plot(v_true[i], v_true[j], "*", ms=16, color=TRUTH, label=word)
         ax.set_xlabel(f"$v_{'xyz'[i]}$ [km/s]")
         ax.set_ylabel(f"$v_{'xyz'[j]}$ [km/s]")
         ax.set_aspect("equal", adjustable="datalim")
@@ -521,22 +567,26 @@ def plot_amplitude_direction(S, path):
     per-sim directions with 1 and 2 sd ellipses, their mean, the direction
     of the mean velocity with its error, and the input; the text box gives
     the numbers."""
-    amp = S["amp"]
+    vin = np.linalg.norm(S["v_true"])
+    amp = S["amp"] * vin                         # v . v_in-hat, km/s
     col = COLOURS[S["name"]]
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.8),
                                    layout="constrained")
     sd = amp.std(ddof=1)
     ax0.hist(amp, bins=30, color=col, alpha=0.4,
-             label=f"$A$ = {amp.mean():+.3f} $\\pm$ {sd:.3f} (sd)\n"
+             label=f"$v_\\parallel$ = {amp.mean():+.0f} $\\pm$ {sd:.0f} "
+                   f"km/s (sd)\n"
                    f"N: {len(amp)} data, {int(S['n_mf'])} mf, "
                    f"{int(S['n_resp'])} response")
     for k in (-2, -1, 1, 2):
         ax0.axvline(amp.mean() + k * sd, color=col, ls=":", lw=1)
     ax0.axvline(amp.mean(), color=col, ls="--")
-    ax0.axvline(1.0, color=TRUTH, lw=2, label="input")
-    ax0.set_xlabel("amplitude $A$")
+    _, A_e, word = expected(S)
+    ax0.axvline(A_e * vin, color=TRUTH, lw=2,
+                label=f"{word}: {A_e * vin:.0f} km/s")
+    ax0.set_xlabel(VPAR)
     ax0.set_ylabel("sims")
-    ax0.legend(fontsize=9)
+    ax0.legend(fontsize=9, frameon=True, framealpha=0.9, edgecolor="none")
 
     # l is unwrapped around the input so the cloud never splits at l = 0,
     # and runs right to left as on the sky.  The aspect 1/cos b makes equal
@@ -696,6 +746,12 @@ def write_report(summary, path):
       f"b = {b_in:+.2f}° (ra {ra_in:.2f}°, dec {dec_in:+.2f}°) |")
     w(f"| input velocity | v_x = {v_in[0]:+.1f}, v_y = {v_in[1]:+.1f}, "
       f"v_z = {v_in[2]:+.1f} km/s (equatorial axes) |")
+    boost = str(S.get("boost", "full"))
+    w("| boost applied to the data sims (`--boost`) | " + {
+        "full": "aberration and modulation",
+        "aberration": "aberration only (modulation estimate should read 0)",
+        "modulation": "modulation only (aberration estimate should read 0)",
+    }[boost] + " |")
     w(f"| modulation factor | b = {float(S['b_nu']):.4f} at "
       f"{float(S['freq']) / 1e9:g} GHz |")
     w(f"| aberration estimator | lensing quadratic estimator, {S['aber_case']} |")
@@ -774,29 +830,42 @@ def write_report(summary, path):
                                            for j in range(6)) + " |")
 
     w("\n## The three estimates side by side (`comparison.png`)\n")
-    w("| estimate | A mean | error on the mean | sd (one sim) | "
-      "(mean − 1)/error |\n|---|---|---|---|---|")
+    w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
+      "(mean − expected)/error |\n|---|---|---|---|---|---|")
     for n, e in E.items():
         a, er, sd = e["stat_mean"][0], e["stat_err"][0], e["stat_sd"][0]
-        w(f"| {n} | {a:+.4f} | {er:.4f} | {sd:.4f} | {(a - 1) / er:+.2f} |")
+        a_e = expected(e)[1]
+        w(f"| {n} | {a_e:+.4f} | {a:+.4f} | {er:.4f} | {sd:.4f} | "
+          f"{(a - a_e) / er:+.2f} |")
     r = np.corrcoef(E["aberration"]["amp"], E["modulation"]["amp"])[0, 1]
     w(f"\nCorrelation of A between aberration and modulation, sim by sim: "
       f"r = {r:+.3f} ± {corr_err(r, n_d):.3f}.")
 
     label = ["A", "v_x [km/s]", "v_y [km/s]", "v_z [km/s]", "ℓ [deg]",
              "b [deg]"]
-    truth = [1.0, *v_in, l_in, b_in]
     fmt = [".4f", ".1f", ".1f", ".1f", ".2f", ".2f"]
+
+    def cell(x, f):
+        return "—" if np.isnan(x) else f"{x:+{f}}"
+
     for n, e in E.items():
+        v_e, A_e, word = expected(e)
+        if np.linalg.norm(v_e) > 0:            # direction of what is expected
+            l_e, b_e = lonlat(v_e @ EQU2GAL.T)
+            l_e = l_in + (l_e - l_in + 180) % 360 - 180
+        else:                                  # none: this effect is absent
+            l_e = b_e = np.nan
+        truth = [A_e, *v_e, l_e, b_e]
         w(f"\n## {TITLES[n][0].upper() + TITLES[n][1:]} (`{n}/`)\n")
         w("Mean ± error on the mean (sd/√n_data), and the sd of one sim "
           "(`whisker.png`, `planes.png`, `amplitude_direction.png`).\n")
-        w("| quantity | input | mean | error on the mean | sd (one sim) "
-          "| (mean − input)/error |\n|---|---|---|---|---|---|")
+        w(f"| quantity | {word} | mean | error on the mean | sd (one sim) "
+          f"| (mean − {word})/error |\n|---|---|---|---|---|---|")
         for k in range(6):
             f, mu, er = fmt[k], e["stat_mean"][k], e["stat_err"][k]
-            w(f"| {label[k]} | {truth[k]:+{f}} | {mu:+{f}} | {er:{f}} | "
-              f"{e['stat_sd'][k]:{f}} | {(mu - truth[k]) / er:+.2f} |")
+            w(f"| {label[k]} | {cell(truth[k], f)} | {mu:+{f}} | {er:{f}} | "
+              f"{e['stat_sd'][k]:{f}} | "
+              f"{cell((mu - truth[k]) / er, '.2f')} |")
         nl, ne = e["null"], float(e["null_err"])
         w(f"| null A | 0 | {nl.mean():+.4f} | {ne:.4f} | "
           f"{nl.std(ddof=1):.4f} | {nl.mean() / ne:+.2f} |")
@@ -852,25 +921,22 @@ def write_report(summary, path):
       "`modulation/unhardened.png`)\n")
     w("Each estimate corrected with its own 3×3 block R of K alone, as a "
       "single-effect analysis would, instead of K⁻¹ for both.  The other "
-      "effect then leaks in, on average R⁻¹ K× v_in, where K× is the block of "
-      "K coupling the estimator to the other effect.  These are computed "
-      "exactly from the hardened estimates (y − y_MF = K (u_ab, u_mod), so R⁻¹ "
-      "applied to one estimator's three components is that estimate plus "
-      "R⁻¹ K× times the other's), not from new simulations.  The two are "
-      "from the same sims, so their difference, sim by sim, is far less noisy "
-      "than either.\n")
-    w("| estimate | A hardened | A not hardened | difference, sim by sim "
-      "| difference predicted |\n|---|---|---|---|---|")
+      "effect then leaks in, on average R⁻¹ K× times its velocity, where K× "
+      "is the block of K coupling the estimator to the other effect.  These "
+      "are computed exactly from the hardened estimates (y − y_MF = "
+      "K (u_ab, u_mod), so R⁻¹ applied to one estimator's three components is "
+      "that estimate plus R⁻¹ K× times the other's), not from new "
+      "simulations.\n")
+    w("| estimate | A expected | A hardened | A not hardened |"
+      "\n|---|---|---|---|")
     for name in ("aberration", "modulation"):
         Sx = with_other(summary, name)
-        v_u, bias = unhardened(Sx)
+        v_u = unhardened(Sx)
         A_h = Sx["vel"] @ v_in / (v_in @ v_in)
         A_u = v_u @ v_in / (v_in @ v_in)
-        w(f"| {TITLES[name]} | {A_h.mean():+.4f} ± "
+        w(f"| {TITLES[name]} | {expected(Sx)[1]:+.4f} | {A_h.mean():+.4f} ± "
           f"{A_h.std(ddof=1) / np.sqrt(n_d):.4f} | {A_u.mean():+.4f} ± "
-          f"{A_u.std(ddof=1) / np.sqrt(n_d):.4f} | {(A_u - A_h).mean():+.4f} "
-          f"± {(A_u - A_h).std(ddof=1) / np.sqrt(n_d):.4f} | "
-          f"{bias @ v_in / (v_in @ v_in):+.4f} |")
+          f"{A_u.std(ddof=1) / np.sqrt(n_d):.4f} |")
 
     w("\n## Aberration amplitude for each lensing combination\n")
     w("The separate aberration estimate (solved with the modulation "
@@ -918,6 +984,10 @@ def make_all(summary, outdir=None):
     for name in ("aberration", "modulation"):
         save(plot_unhardened, with_other(summary, name),
              os.path.join(outdir, name, "unhardened.png"))
+        S = load(summary, name)
+        if "mf_map" in S:                      # summaries from before lack it
+            save(plot_meanfield_map, S,
+                 os.path.join(outdir, name, "meanfield_map.png"))
     save(plot_comparison, [load(summary, n) for n in TITLES],
          os.path.join(outdir, "comparison.png"))
     write_report(summary, os.path.join(outdir, "report.md"))

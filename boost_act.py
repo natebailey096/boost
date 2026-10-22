@@ -26,6 +26,16 @@ Each job makes and caches the sims i with i % nshards == shard.  When all
 have finished, run once more without --shard/--nshards: that run makes any
 sims still missing and writes the complete report and figures.
 
+--boost aberration or --boost modulation applies only that effect to the
+data sims (the default, full, applies both), to check that each estimator
+recovers its own effect and that hardening removes the other: the expected
+value of each estimate is then printed and drawn in place of the input.
+Those data sims are cached as data_aberration_XXXX.npy or
+data_modulation_XXXX.npy, with the same seeds as the full-boost data sims,
+and the summary and plots go to cache_boost/<mask>_<noise>/boost_<effect>/.
+The mean-field and response sims do not depend on the boost, so all three
+options share them.
+
 Within one job, --nproc N makes N sims at a time in N worker processes (set
 OMP_NUM_THREADS = cpus / N, and allow memory for N sims).  The workers are
 started fresh ("spawn") and each repeats the set-up below once, because
@@ -115,10 +125,17 @@ parser.add_argument("--mask", default="dr6", choices=["none", "dr6"],
                     help="none: full sky.  dr6: the ACT DR6 lensing mask")
 parser.add_argument("--mask-file", default=os.path.basename(MASK_URL),
                     help="the DR6 healpix mask (--mask dr6 only)")
-parser.add_argument("--noise", default="f150", choices=["f150", "act", "none"],
+parser.add_argument("--noise", default="f150", choices=["f150", "act"],
                     help="white noise level in T: f150 is 24 uK-arcmin, act "
                          "is 14 uK-arcmin (P is sqrt2 x); the beam and the "
                          "1/f knees are the same")
+parser.add_argument("--boost", default="full",
+                    choices=["full", "aberration", "modulation"],
+                    help="which effects the data sims get: both (full), or "
+                         "only one, to check that each estimate recovers its "
+                         "own effect.  Mean-field and response sims are "
+                         "shared; the data sims and the summary and plots "
+                         "are kept separately")
 parser.add_argument("--n-meanfield", type=int, default=800)
 parser.add_argument("--n-response", type=int, default=60)
 parser.add_argument("--n-data", type=int, default=400)
@@ -156,7 +173,7 @@ warnings.filterwarnings("ignore", message="The tweak argument is deprecated")
 LMIN, LMAX, MLMAX = 600, 3000, 3500
 LOUT = 5                                  # highest reconstruction L kept
 RES = 3.0 * utils.arcmin                  # fejer1 grid: exact SHTs to l = 3599
-NOISE_LEVELS = {"f150": 24.0, "act": 14.0, "none": 0.0}    # uK-arcmin in T (P is sqrt2 x)
+NOISE_LEVELS = {"f150": 24.0, "act": 14.0}    # uK-arcmin in T (P is sqrt2 x)
 NOISE_T = NOISE_LEVELS[args.noise]
 BEAM = 1.42                               # FWHM, arcmin
 TCMB, C_KMS = 2.7255e6, 299792.458        # uK, km/s
@@ -171,6 +188,12 @@ ABER_CASE = "T+P"                         # lensing combination used for u_aber
 CACHE_TAG = f"{args.mask}_{args.noise}"   # new value whenever a setting changes
 CACHE = os.path.join("cache_boost", CACHE_TAG)     # summary.npz and plots/
 SIMS = os.path.join(CACHE, "sims")                 # one .npy per sim
+# Effects applied to the data sims, the data sims' label, and where this
+# run's summary and plots go.  --boost full keeps the original names.
+ABERRATE = args.boost in ("full", "aberration")
+MODULATE = args.boost in ("full", "modulation")
+DATA = "data" if args.boost == "full" else f"data {args.boost}"
+OUT = CACHE if args.boost == "full" else os.path.join(CACHE, f"boost_{args.boost}")
 
 X_NU = utils.h * FREQ / (utils.k * utils.T_cmb)
 B_NU = X_NU / np.tanh(X_NU / 2) - 1       # linearised-T modulation factor
@@ -360,7 +383,7 @@ def move_old_sims():
 BASE = "unboosted"
 EFFECTS = ("aberration", "modulation")
 RESP_LABELS = [f"{effect} {axis}" for effect in EFFECTS for axis in "xyz"]
-STAGE = {"mf": "mf", "data": "data", BASE: "response",
+STAGE = {"mf": "mf", DATA: "data", BASE: "response",
          **{l: "response" for l in RESP_LABELS}}
 TODO = {}           # sims this run still has to make, per label (set in main)
 
@@ -371,13 +394,15 @@ def one_sim(label, i):
       unboosted   unboosted CMB, no noise (response)
       <effect> <axis>  the same CMB boosted by +BETA along the axis, with
                   aberration only or modulation only (response)
-      data        CMB with the full boost + noise"""
+      data        CMB with the full boost + noise
+      data <effect>  the same CMB with that effect only + the same noise"""
     if label == "mf":
         return reconstruct(cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i))
     if label == BASE:
         return reconstruct(cmb(2_000_000 + i))
-    if label == "data":
-        return reconstruct(boost(cmb(3_000_000 + 2 * i), BDIR, BETA)
+    if label.startswith("data"):
+        return reconstruct(boost(cmb(3_000_000 + 2 * i), BDIR, BETA,
+                                 aberrate=ABERRATE, modulate=MODULATE)
                            + noise(3_000_001 + 2 * i))
     effect, axis = label.split()
     return reconstruct(boost(cmb(2_000_000 + i), AXES["xyz".index(axis)], BETA,
@@ -499,18 +524,24 @@ def stats(u):
 def report(title, e):
     """Print one estimate and return what the summary keeps of it."""
     mean, sd, err = e["mean"], e["sd"], e["err"]
+    v_exp = C_KMS * e["u_expect"]
+    A_exp = e["u_expect"] @ U_TRUE / (U_TRUE @ U_TRUE)
     dirs = e["u"] / np.linalg.norm(e["u"], axis=1)[:, None]
     ubar = e["u"].mean(axis=0) / np.linalg.norm(e["u"].mean(axis=0))
     l_in, b_in = galactic(D_TRUE)
     v_in = C_KMS * U_TRUE
     print(f"\n{title}")
     print(f"   A = {mean[0]:+.4f} +- {sd[0]:.4f} (sd), +- {err[0]:.4f} "
-          f"(error on the mean, sd/sqrt(n_data))   expect 1")
+          f"(error on the mean, sd/sqrt(n_data))   expect {A_exp:.3f}")
     print(f"   null A = {e['null'].mean():+.4f} +- {e['null_err']:.4f}"
           f"   expect 0")
     print("   v [km/s]  " + "   ".join(
         f"{'xyz'[k]} {mean[k + 1]:+7.1f} +- {err[k + 1]:5.1f} "
-        f"(in {v_in[k]:+6.1f})" for k in range(3)))
+        f"(expect {v_exp[k]:+6.1f})" for k in range(3)))
+    if not np.allclose(v_exp, v_in):
+        print("   (expected values are for the effect(s) applied; the "
+              "input velocity is " + ", ".join(f"{x:+.1f}" for x in v_in)
+              + " km/s)")
     print(f"   galactic  l = {mean[4]:.2f} +- {err[4]:.2f} (sd {sd[4]:.2f}), "
           f"b = {mean[5]:+.2f} +- {err[5]:.2f} (sd {sd[5]:.2f});  "
           f"input l = {l_in:.2f}, b = {b_in:+.2f}")
@@ -520,14 +551,16 @@ def report(title, e):
           f"{np.median(np.degrees(np.arccos(np.clip(dirs @ D_TRUE, -1, 1)))):.1f} deg")
     return dict(amp=e["stats"][:, 0], vel=e["stats"][:, 1:4], dir=dirs,
                 null=e["null"], null_err=e["null_err"], stat_mean=mean,
-                stat_sd=sd, stat_err=err)
+                stat_sd=sd, stat_err=err, v_expect=v_exp, A_expect=A_exp)
 
 
 def higher_l(Y, own):
     """(L, M) response of one estimator to its own effect, and the coherent
-    power the true (full) boost leaves at each L, with a jackknife error."""
+    power the applied boost (--boost) leaves at each L, with a jackknife
+    error."""
     S = Y[1][own] / BETA                               # (axis, sim, npack)
-    P = np.einsum("jia,j->ia", (Y[1][0] + Y[1][1]) / BETA, U_TRUE)
+    P = np.einsum("jia,j->ia", (ABERRATE * Y[1][0] + MODULATE * Y[1][1])
+                  / BETA, U_TRUE)
     n_r = len(P)
     jk = np.array([debiased_cl(np.delete(P, k, axis=0)) for k in range(n_r)])
     M, D = Y[0], Y[2]
@@ -570,15 +603,23 @@ def solve(names, mf, diff, dat):
     n_m = len(y_mf)
     m, C = y_mf.mean(axis=0), np.cov(y_mf, rowvar=False)
     L = linear_maps(K, y_mf)
+    # What each estimate should average to for the effects applied: L K x,
+    # with x the true (u_ab, u_mod).  For the full boost this is u_in for
+    # all three; with one effect it is u_in or 0 for the separate estimates
+    # and that effect's share of the weights for the joint one.
+    x_true = np.r_[ABERRATE * U_TRUE, MODULATE * U_TRUE]
     h = n_m // 2
     null_y = y_mf[h:] - y_mf[:h].mean(axis=0)     # split-half null test
     est = {}
     for e in L:
+        u_exp = L[e] @ K @ x_true
+        u_exp[np.abs(u_exp) < 1e-9 * np.linalg.norm(U_TRUE)] = 0.0  # rounding
         u = (y_dat - m) @ L[e].T
         st = stats(u)
         sd = st.std(axis=0, ddof=1)
         null = null_y @ L[e].T @ U_TRUE / (U_TRUE @ U_TRUE)
         est[e] = dict(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
+                      u_expect=u_exp,
                       err=sd / np.sqrt(len(st)), null=null,
                       null_err=null.std(ddof=1) * np.sqrt(1 / len(null) + 1 / h))
     return Y, K, Kerr, m, C, est
@@ -643,6 +684,10 @@ def main():
           + (f" ({args.mask_file})" if MASK is not None else " (full sky)")
           + f", noise {args.noise} ({NOISE_T:g} uK-arcmin in T), "
           f"cache tag {CACHE_TAG}")
+    print(f"boost {args.boost}: data sims "
+          + {"full": "aberrated and modulated", "aberration": "aberrated only",
+             "modulation": "modulated only"}[args.boost]
+          + f"; summary and plots in {OUT}/")
     print(f"lmin {LMIN}, lmax {LMAX}, mlmax {MLMAX}, {RES / utils.arcmin:g}' "
           f"CAR {shape[0]}x{shape[1]}, fsky {W1:.4f}, w2 {W2:.4f}")
     print(f"beta {BETA:.4e} towards ra {np.degrees(BDIR[0]):.2f}, "
@@ -654,7 +699,7 @@ def main():
              else ""))
     os.makedirs(SIMS, exist_ok=True)
     move_old_sims()
-    counts = {"mf": args.n_meanfield, "data": args.n_data,
+    counts = {"mf": args.n_meanfield, DATA: args.n_data,
               BASE: args.n_response, **{l: args.n_response for l in RESP_LABELS}}
     TODO.update({l: sum(not os.path.exists(cache_path(l, i))
                         for i in range(args.shard, n, args.nshards))
@@ -676,7 +721,7 @@ def main():
         for label in [BASE] + RESP_LABELS:
             run(label, args.n_response)
         print("\n[C] data")
-        run("data", args.n_data)
+        run(DATA, args.n_data)
     finally:
         if POOL:
             POOL.terminate()
@@ -686,7 +731,7 @@ def main():
     mf = collect(["mf"], args.n_meanfield)[0]
     legs = collect(RESP_LABELS + [BASE], args.n_response)   # (7 legs, sim, ...)
     diff = (legs[:-1] - legs[-1]).reshape((2, 3) + legs.shape[1:])
-    dat = collect(["data"], args.n_data)[0]
+    dat = collect([DATA], args.n_data)[0]
     counts = (len(mf), diff.shape[2], len(dat))
     print(f"\ncollected {counts[0]}/{args.n_meanfield} mean-field, "
           f"{counts[1]}/{args.n_response} response and "
@@ -710,7 +755,7 @@ def main():
                alpha=[ALPHA_T, ALPHA_P], tcmb=TCMB,
                cl_tt=cltt, cl_ee=clee, nl_tt=nltt, nl_ee=nlee,
                pack_l=PACK_L, pack_m=PACK_M, fsky=W1, w2=W2,
-               aber_case=ABER_CASE)
+               aber_case=ABER_CASE, boost=args.boost)
     if MASK is not None:
         thumb = enmap.downgrade(MASK, max(1, round(0.5 * utils.degree / RES)))
         dec, ra = enmap.posaxes(thumb.shape, thumb.wcs)
@@ -719,14 +764,15 @@ def main():
     for name, res in results.items():
         for key, val in res.items():
             out[f"{name}.{key}"] = val
-    path = os.path.join(CACHE, "summary.npz")
+    os.makedirs(OUT, exist_ok=True)
+    path = os.path.join(OUT, "summary.npz")
     tmp = f"{path}.{os.getpid()}.npz"
     np.savez(tmp, **out)
     os.replace(tmp, path)
     print(f"\nwrote {path}")
 
     import boost_act_plots
-    boost_act_plots.make_all(path)             # -> CACHE/plots
+    boost_act_plots.make_all(path)             # -> OUT/plots
 
 
 if __name__ == "__main__":
