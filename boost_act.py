@@ -327,6 +327,17 @@ else:
 PACK_L = np.array([l for l in range(LOUT + 1) for m in range(l + 1)])
 PACK_M = np.array([m for l in range(LOUT + 1) for m in range(l + 1)])
 PACK_IDX = hp.Alm.getidx(MLMAX, PACK_L, PACK_M)
+# Coarse grid for maps of the reconstructions at L <= LOUT (figures only).
+MAP_SHAPE, MAP_WCS = enmap.fullsky_geometry(res=2 * utils.degree)
+
+
+def lowl_map(packed):
+    """Packed alm (L <= LOUT), in units of u, -> map on a 2-degree grid in
+    km/s: at L = 1 its value at n is c u.n."""
+    a = np.zeros(hp.Alm.getsize(LOUT), complex)
+    a[hp.Alm.getidx(LOUT, PACK_L, PACK_M)] = packed
+    return np.asarray(curvedsky.alm2map(a, enmap.zeros(MAP_SHAPE, MAP_WCS))
+                      ) * C_KMS
 
 
 def cmb(seed):
@@ -658,6 +669,15 @@ def analyse(mf, diff, dat):
         out[name].update(higher_l(Y[i], i), R=K[blk], Rerr=Kerr[blk],
                          eig_err=np.sqrt((len(eig) - 1) * np.var(eig, axis=0)),
                          R_jk=np.array([Kk[blk] for Kk in K_jk]))
+        # Maps of what this estimator reconstructs at L <= LOUT: the mean
+        # over the unboosted (mean-field) sims, one of those sims alone, and
+        # the signal of the applied boost, from the response sims.
+        D = Y[i][1] / BETA                      # (effect, axis, sim, npack)
+        sig = np.einsum("jsa,j->a", (ABERRATE * D[0] + MODULATE * D[1]),
+                        U_TRUE) / D.shape[2]
+        out[name].update(mf_map=lowl_map(Y[i][0].mean(axis=0)),
+                         sim_map=lowl_map(Y[i][0][0]),
+                         signal_map=lowl_map(sig))
     sd = np.sqrt(np.diag(C))
     # For the figures only: the copies of K, and the joint linear map G with
     # its copies (weights recomputed for each), so the plots can show errors
@@ -755,7 +775,9 @@ def main():
                alpha=[ALPHA_T, ALPHA_P], tcmb=TCMB,
                cl_tt=cltt, cl_ee=clee, nl_tt=nltt, nl_ee=nlee,
                pack_l=PACK_L, pack_m=PACK_M, fsky=W1, w2=W2,
-               aber_case=ABER_CASE, boost=args.boost)
+               aber_case=ABER_CASE, boost=args.boost,
+               map_dec=np.degrees(enmap.posaxes(MAP_SHAPE, MAP_WCS)[0]),
+               map_ra=np.degrees(enmap.posaxes(MAP_SHAPE, MAP_WCS)[1]))
     if MASK is not None:
         thumb = enmap.downgrade(MASK, max(1, round(0.5 * utils.degree / RES)))
         dec, ra = enmap.posaxes(thumb.shape, thumb.wcs)
