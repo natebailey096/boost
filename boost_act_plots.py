@@ -120,6 +120,18 @@ def expected(S):
     return np.asarray(S["v_true"]), 1.0, "input"
 
 
+def mf_over_u(sy):
+    """|mean field| / |u_in| of the aberration and modulation estimators'
+    L = 1 dipoles.  Summaries from before store |mean field| / |K u_in|
+    (mf_ratio) instead, which this converts with |K u_in| / |u_in|."""
+    if "mf_over_u" in sy:
+        return np.asarray(sy["mf_over_u"])
+    K, u = sy["K"], sy["v_true"]
+    Kj = K[:, :3] + K[:, 3:]
+    return np.asarray(sy["mf_ratio"]) * np.array(
+        [np.linalg.norm(Kj[i:i + 3] @ u) / np.linalg.norm(u) for i in (0, 3)])
+
+
 def load(path, name=None):
     """Shared entries of summary.npz, plus those of one estimate
     (aberration, modulation, joint or system) with the prefix dropped."""
@@ -182,8 +194,9 @@ def plot_meanfield_map(S, path):
     own.  The bottom map is the signal of the applied boost, from the
     response sims, for scale.  Each map has its own symmetric colour scale;
     the mask's edge (weight 0.5) is outlined.  Equatorial Mollweide centred
-    on RA 0, dec 0.  The mean-field panel gives |mean field| / |K u_in|, the
-    ratio of its L = 1 dipole to the signal's (as in the report)."""
+    on RA 0, dec 0.  The mean-field panel gives |mean field| / |u_in|, the
+    size of its L = 1 dipole relative to the input boost (as in the
+    report)."""
     def x_of(ra):                       # RA increasing to the left
         return -np.radians((np.asarray(ra) + 180) % 360 - 180)
 
@@ -217,9 +230,9 @@ def plot_meanfield_map(S, path):
         ax.set_xticks(xt, [f"{(-d) % 360:.0f}" for d in np.degrees(xt)],
                       fontsize=7)
         ax.tick_params(axis="y", labelsize=7)
-        if k == 0 and "mf_ratio" in S:
-            title += ("\n$|$mean field$|$ / $|K\\,u_{\\rm in}|$ = "
-                      f"{float(S['mf_ratio']):.1f}  (dipoles, L = 1)")
+        if k == 0 and "mf_over_u" in S:
+            title += ("\n$|$mean field$|$ / $|u_{\\rm in}|$ = "
+                      f"{float(S['mf_over_u']):.1f}  (dipole, L = 1)")
         ax.set_title(title, fontsize=10)
         cb = fig.colorbar(pcm, ax=ax, orientation="horizontal", shrink=0.5,
                           pad=0.04, label="10³ km/s" if unit > 1 else "km/s")
@@ -820,9 +833,10 @@ def write_report(summary, path):
         w(f"| {comp[i]} QE | " + " | ".join(
             f"{sy['K'][i, j]:+.4f} ± {sy['Kerr'][i, j]:.4f}" for j in range(6))
           + " |")
-    w(f"\nMean field relative to the signal, |mean field| / |K u_in|: "
-      f"aberration QE {sy['mf_ratio'][0]:.2f}, modulation QE "
-      f"{sy['mf_ratio'][1]:.2f}.\n")
+    mfu = mf_over_u(sy)
+    w(f"\nMean field relative to the input boost, |mean field| / |u_in| "
+      f"(L = 1 dipoles): aberration QE {mfu[0]:.2f}, modulation QE "
+      f"{mfu[1]:.2f}.\n")
     if "w_joint" in sy:
         w("Joint weight on the aberration estimate (modulation gets 1 − w), "
           "x, y, z: " + ", ".join(f"{v:.3f}" for v in sy["w_joint"]) + ".\n")
@@ -989,7 +1003,7 @@ def make_all(summary, outdir=None):
         save(plot_unhardened, with_other(summary, name),
              os.path.join(outdir, name, "unhardened.png"))
         S = load(summary, name)
-        S["mf_ratio"] = load(summary, "system")["mf_ratio"][
+        S["mf_over_u"] = mf_over_u(load(summary, "system"))[
             ("aberration", "modulation").index(name)]
         if "mf_map" in S:                      # summaries from before lack it
             save(plot_meanfield_map, S,

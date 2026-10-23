@@ -643,9 +643,10 @@ def analyse(mf, diff, dat):
     K_jk = [system((ABER_CASE, "MOD"), mf, np.delete(diff, k, axis=2), dat)[3]
             for k in range(diff.shape[2])]
     y_mf = system((ABER_CASE, "MOD"), mf, diff, dat)[1]
-    Kj = K[:, :3] + K[:, 3:]
-    mf_ratio = np.array([np.linalg.norm(m[i:i + 3])
-                         / np.linalg.norm(Kj[i:i + 3] @ U_TRUE) for i in (0, 3)])
+    # Size of each estimator's mean-field dipole relative to the input boost
+    # (both in units of u, so this is |mean field| in km/s over 370 km/s).
+    mf_over_u = np.array([np.linalg.norm(m[i:i + 3]) / np.linalg.norm(U_TRUE)
+                          for i in (0, 3)])
 
     print(f"\nresponse K per unit u: rows {ABER_CASE} QE xyz, MOD QE xyz; "
           f"columns aberration xyz, modulation xyz")
@@ -653,8 +654,8 @@ def analyse(mf, diff, dat):
         print("   " + " ".join(f"{K[i, j]:+.3f}({Kerr[i, j] * 1e3:3.0f})"
                                for j in range(6)))
     print(f"   (MC error on the mean in units of 1e-3; b = {B_NU:.4f})")
-    print(f"   |mean field| / |K u_in|:  {ABER_CASE} {mf_ratio[0]:.1f},  "
-          f"MOD {mf_ratio[1]:.1f}")
+    print(f"   |mean field| / |u_in|:  {ABER_CASE} {mf_over_u[0]:.1f},  "
+          f"MOD {mf_over_u[1]:.1f}")
     w_joint = joint_weights(K, y_mf)
     print("   joint weight on the aberration estimate x, y, z: "
           + ", ".join(f"{w:.3f}" for w in w_joint))
@@ -683,7 +684,7 @@ def analyse(mf, diff, dat):
     # its copies (weights recomputed for each), so the plots can show errors
     # on R^-1, K^-1 and G.  C is kept for the correlation figure.
     out["system"] = dict(K=K, Kerr=Kerr, corr=C / np.outer(sd, sd),
-                         mf_ratio=mf_ratio, K_jk=np.array(K_jk),
+                         mf_over_u=mf_over_u, K_jk=np.array(K_jk),
                          w_joint=w_joint, G=linear_maps(K, y_mf)["joint"],
                          G_jk=np.array([linear_maps(Kk, y_mf)["joint"]
                                         for Kk in K_jk]))
