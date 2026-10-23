@@ -134,9 +134,9 @@ def load(path, name=None):
 
 def plot_coverage(S, path):
     """Mask in equatorial Mollweide, RA increasing to the left, centred on
-    RA 180, with the galactic plane and the dipole axis."""
+    RA 0, dec 0, with the galactic plane and the dipole axis."""
     def x_of(ra):
-        return -np.radians((np.asarray(ra) - 180 + 180) % 360 - 180)
+        return -np.radians((np.asarray(ra) + 180) % 360 - 180)
 
     if "mask_thumb" in S:
         ra_ax, dec_ax, W = S["mask_ra"], S["mask_dec"], S["mask_thumb"]
@@ -163,7 +163,7 @@ def plot_coverage(S, path):
             mec=INK, label="antipode")
     ax.plot([], [], color=TRUTH, ls="--", label="galactic plane")
     xt = np.radians(np.arange(-150, 151, 30))
-    ax.set_xticks(xt, [f"{(180 - d) % 360:.0f}" for d in np.degrees(xt)],
+    ax.set_xticks(xt, [f"{(-d) % 360:.0f}" for d in np.degrees(xt)],
                   fontsize=8)
     ax.set_title(f"mask {str(S['mask_kind'])}, "
                  f"f_sky = {float(S['fsky']):.3f}")
@@ -181,9 +181,11 @@ def plot_meanfield_map(S, path):
     unboosted mean-field sims (the mean field), and one of those sims on its
     own.  The bottom map is the signal of the applied boost, from the
     response sims, for scale.  Each map has its own symmetric colour scale;
-    the mask's edge (weight 0.5) is outlined."""
+    the mask's edge (weight 0.5) is outlined.  Equatorial Mollweide centred
+    on RA 0, dec 0.  The mean-field panel gives |mean field| / |K u_in|, the
+    ratio of its L = 1 dipole to the signal's (as in the report)."""
     def x_of(ra):                       # RA increasing to the left
-        return -np.radians((np.asarray(ra) - 180 + 180) % 360 - 180)
+        return -np.radians((np.asarray(ra) + 180) % 360 - 180)
 
     ra, dec = S["map_ra"], S["map_dec"]
     order = np.argsort(x_of(ra))
@@ -199,7 +201,6 @@ def plot_meanfield_map(S, path):
     for k, (M, title) in enumerate(panels):
         ax = fig.add_subplot(3, 1, k + 1, projection="mollweide")
         M = np.asarray(M)[:, order]
-        rms = np.sqrt(np.mean(M ** 2))
         unit = 1e3 if np.abs(M).max() > 5e3 else 1.0       # tidy colour bar
         M = M / unit
         v = np.abs(M).max()
@@ -213,10 +214,13 @@ def plot_meanfield_map(S, path):
         ax.plot(x_of(ra_d), np.radians(dec_d), "*", ms=14, mfc="gold",
                 mec=INK, label="input direction")
         xt = np.radians(np.arange(-150, 151, 30))
-        ax.set_xticks(xt, [f"{(180 - d) % 360:.0f}" for d in np.degrees(xt)],
+        ax.set_xticks(xt, [f"{(-d) % 360:.0f}" for d in np.degrees(xt)],
                       fontsize=7)
         ax.tick_params(axis="y", labelsize=7)
-        ax.set_title(f"{title}\nrms {rms:.0f} km/s", fontsize=10)
+        if k == 0 and "mf_ratio" in S:
+            title += ("\n$|$mean field$|$ / $|K\\,u_{\\rm in}|$ = "
+                      f"{float(S['mf_ratio']):.1f}  (dipoles, L = 1)")
+        ax.set_title(title, fontsize=10)
         cb = fig.colorbar(pcm, ax=ax, orientation="horizontal", shrink=0.5,
                           pad=0.04, label="10³ km/s" if unit > 1 else "km/s")
         cb.ax.locator_params(nbins=5)
@@ -985,9 +989,16 @@ def make_all(summary, outdir=None):
         save(plot_unhardened, with_other(summary, name),
              os.path.join(outdir, name, "unhardened.png"))
         S = load(summary, name)
+        S["mf_ratio"] = load(summary, "system")["mf_ratio"][
+            ("aberration", "modulation").index(name)]
         if "mf_map" in S:                      # summaries from before lack it
             save(plot_meanfield_map, S,
                  os.path.join(outdir, name, "meanfield_map.png"))
+        else:
+            print(f"skipped {name}/meanfield_map.png: {summary} has no maps.  "
+                  "It was written by a boost_act.py older than the map "
+                  "change; rerun the current boost_act.py with the same "
+                  "options (it reuses the cached sims)")
     save(plot_comparison, [load(summary, n) for n in TITLES],
          os.path.join(outdir, "comparison.png"))
     write_report(summary, os.path.join(outdir, "report.md"))
