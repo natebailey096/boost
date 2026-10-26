@@ -9,8 +9,13 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        aberration against modulation)
     plots/aberration/  lensing QE, solved without assuming the modulation;
                        unhardened shows the bias of R^-1 alone;
-                       meanfield_map shows its reconstruction on the sky
-                       with no boost (mean field, and one sim)
+                       meanfield_map_mean and meanfield_map_one_sim show
+                       its reconstruction on the sky: mean field, data, and
+                       data - mean field, averaged and for one sim;
+                       lensing_response (--cmb lensed) its (L, M) response
+                       to each lensing mode phi_L'M'
+    plots/lensing_dipole.png  (--cmb lensed) how lensing at each L' leaks
+                       into the velocity estimates
     plots/modulation/  modulation QE, solved without assuming the aberration;
                        unhardened likewise
     plots/joint/       one velocity for both effects; inverse_response is
@@ -187,38 +192,28 @@ def plot_coverage(S, path):
     plt.close(fig)
 
 
-def plot_meanfield_map(S, path):
-    """What this estimator reconstructs on the sky at L <= LOUT, in km/s
-    (at L = 1, c u.n), with no boost applied: the mean over the masked,
-    unboosted mean-field sims (the mean field), and one of those sims on its
-    own.  The bottom map is the signal of the applied boost, from the
-    response sims, for scale.  Each map has its own symmetric colour scale;
-    the mask's edge (weight 0.5) is outlined.  Equatorial Mollweide centred
-    on RA 0, dec 0.  The mean-field panel gives |mean field| / |u_in|, the
-    size of its L = 1 dipole relative to the input boost (as in the
-    report)."""
+def _three_maps(S, panels, path, suptitle):
+    """Three sky maps of one estimator's reconstruction at L <= LOUT, in
+    km/s (at L = 1, c u.n), stacked: mean field, data, data minus mean field.
+    The first two share a colour scale, so they can be compared; the third
+    has its own.  The mask's edge (weight 0.5) is outlined and the input
+    direction starred.  Equatorial Mollweide centred on RA 0, dec 0."""
     def x_of(ra):                       # RA increasing to the left
         return -np.radians((np.asarray(ra) + 180) % 360 - 180)
 
     ra, dec = S["map_ra"], S["map_dec"]
     order = np.argsort(x_of(ra))
     xs, ys = x_of(ra)[order], np.radians(dec)
-    lout = int(S["pack_l"].max())
-    panels = [(S["mf_map"], f"mean field: mean of {int(S['n_mf'])} masked, "
-               "unboosted sims"),
-              (S["sim_map"], "one masked, unboosted sim"),
-              (S["signal_map"], "signal of the applied boost "
-               "(response sims), for scale")]
+    maps = [np.asarray(M)[:, order] for M, _ in panels]
+    shared = max(np.abs(maps[0]).max(), np.abs(maps[1]).max())
     fig = plt.figure(figsize=(8.5, 13), layout="constrained")
     ra_d, dec_d = lonlat(S["d_true"])
-    for k, (M, title) in enumerate(panels):
+    for k, (M, (_, title)) in enumerate(zip(maps, panels)):
         ax = fig.add_subplot(3, 1, k + 1, projection="mollweide")
-        M = np.asarray(M)[:, order]
-        unit = 1e3 if np.abs(M).max() > 5e3 else 1.0       # tidy colour bar
-        M = M / unit
-        v = np.abs(M).max()
-        pcm = ax.pcolormesh(xs, ys, M, cmap="RdBu_r", vmin=-v, vmax=v,
-                            shading="auto", rasterized=True)
+        v = shared if k < 2 else np.abs(M).max()
+        unit = 1e3 if v > 5e3 else 1.0                 # tidy colour bar
+        pcm = ax.pcolormesh(xs, ys, M / unit, cmap="RdBu_r", vmin=-v / unit,
+                            vmax=v / unit, shading="auto", rasterized=True)
         if "mask_thumb" in S:
             mo = np.argsort(x_of(S["mask_ra"]))
             ax.contour(x_of(S["mask_ra"])[mo], np.radians(S["mask_dec"]),
@@ -230,18 +225,47 @@ def plot_meanfield_map(S, path):
         ax.set_xticks(xt, [f"{(-d) % 360:.0f}" for d in np.degrees(xt)],
                       fontsize=7)
         ax.tick_params(axis="y", labelsize=7)
-        if k == 0 and "mf_over_u" in S:
-            title += ("\n$|$mean field$|$ / $|u_{\\rm in}|$ = "
-                      f"{float(S['mf_over_u']):.1f}  (dipole, L = 1)")
         ax.set_title(title, fontsize=10)
         cb = fig.colorbar(pcm, ax=ax, orientation="horizontal", shrink=0.5,
                           pad=0.04, label="10³ km/s" if unit > 1 else "km/s")
         cb.ax.locator_params(nbins=5)
     ax.legend(loc="lower right", fontsize=8)
-    fig.suptitle(f"{TITLES[S['name']]} estimator: reconstruction, "
-                 f"L = 1–{lout}", fontsize=12)
+    fig.suptitle(suptitle, fontsize=12)
     fig.savefig(path)
     plt.close(fig)
+
+
+def _mf_title(S, title):
+    if "mf_over_u" in S:
+        title += ("\n$|$mean field$|$ / $|u_{\\rm in}|$ = "
+                  f"{float(S['mf_over_u']):.1f}  (dipole, L = 1)")
+    return title
+
+
+def plot_maps_mean(S, path):
+    """Mean field (mean of the mean-field sims), mean of the data sims, and
+    their difference, which is what the boost leaves once the mean field is
+    subtracted, averaged over the data sims."""
+    lout = int(S["pack_l"].max())
+    _three_maps(S, [
+        (S["mf_map"], _mf_title(S, f"mean field: mean of {int(S['n_mf'])} "
+                                   "unboosted sims")),
+        (S["dat_map"], f"data: mean of {int(S['n_data'])} boosted sims"),
+        (S["dat_map"] - S["mf_map"], "data − mean field (both averaged)")],
+        path, f"{TITLES[S['name']]} estimator, averaged: L = 1–{lout}")
+
+
+def plot_maps_one_sim(S, path):
+    """One mean-field sim, one data sim, and that data sim minus the mean
+    field (the average, as the analysis subtracts it): what a single sky
+    gives."""
+    lout = int(S["pack_l"].max())
+    _three_maps(S, [
+        (S["sim_map"], "one unboosted (mean-field) sim"),
+        (S["dat_sim_map"], "one boosted (data) sim"),
+        (S["dat_sim_map"] - S["mf_map"],
+         "that data sim − mean field (the average)")],
+        path, f"{TITLES[S['name']]} estimator, one sim: L = 1–{lout}")
 
 
 def plot_noise(S, path):
@@ -692,6 +716,106 @@ def plot_alm_response(S, path):
     plt.close(fig)
 
 
+def plot_lensing_response(S, path):
+    """(L, M) response of one estimator to each lensing mode phi_{L'M'}, in
+    the real basis: phi-hat per phi for the lensing (aberration) estimator,
+    f-hat per phi for the modulation one.  Without a mask the first is the
+    identity and the second zero; a mask mixes L.  Boxes mark L = L'; entries
+    within 2 sd of zero are blank; the linear band of the colour scale is
+    the median MC error on the mean.  S is load(summary, "system") + name."""
+    key = "lens_R_ab" if S["name"] == "aberration" else "lens_R_mod"
+    pl, pm = S["pack_l"], S["pack_m"]
+    rows, V = real_basis(S[key], pl, pm)               # (in mode, out)
+    V = V.T                                            # (out, in)
+    cols = [tuple(m) for m in S["phi_modes"]]
+    # Error of each real-basis output: the sd of its complex a_L|M|, as in
+    # plot_alm_response (the real and imaginary parts share it).
+    sd = S[key + "_sd"]                                # (in mode, npack)
+    err = np.array([sd[:, np.flatnonzero((pl == l) & (pm == abs(m)))[0]]
+                    for l, m in rows]) / np.sqrt(int(S["n_lens_resp"]))
+    thresh = max(float(np.median(err)), 1e-6 * np.abs(V).max())
+    vmax = max(np.abs(V).max(), 10 * thresh)
+    V = np.where(np.abs(V) > 2 * err, V, np.nan)      # blank: within 2 sd of 0
+    nr, nc = V.shape
+    fig, ax = plt.subplots(figsize=(1.6 + 0.26 * nc, 1.4 + 0.26 * nr),
+                           layout="constrained")
+    ax.set_facecolor("0.93")
+    im = ax.imshow(V, cmap="RdBu_r", aspect="auto",
+                   norm=SymLogNorm(thresh, vmin=-vmax, vmax=vmax))
+    lr = np.array([l for l, m in rows])
+    lc = np.array([l for l, m in cols])
+    for e in np.flatnonzero(np.diff(lr)) + 1:
+        ax.axhline(e - 0.5, color="white", lw=1.2)
+    for e in np.flatnonzero(np.diff(lc)) + 1:
+        ax.axvline(e - 0.5, color="white", lw=1.2)
+    for L in range(1, min(lr.max(), lc.max()) + 1):    # the L = L' blocks
+        r0, c0 = np.flatnonzero(lr == L)[0], np.flatnonzero(lc == L)[0]
+        ax.add_patch(Rectangle((c0 - 0.5, r0 - 0.5), 2 * L + 1, 2 * L + 1,
+                               fill=False, ec=INK, lw=1.5))
+    ax.set_xticks(range(nc), [f"{l},{m:+d}" for l, m in cols], rotation=90,
+                  fontsize=7)
+    ax.set_yticks(range(nr), [f"{l},{m:+d}" for l, m in rows], fontsize=7)
+    ax.set_xlabel("input lensing mode $(L', M')$")
+    ax.set_ylabel("reconstructed $(L, M)$")
+    ax.grid(False)
+    unit = (r"$\hat\phi_{LM}$ per $\phi_{L'M'}$" if S["name"] == "aberration"
+            else r"$\hat f_{LM}$ per $\phi_{L'M'}$")
+    ax.set_title(f"{TITLES[S['name']]} estimator: response to lensing modes "
+                 f"({int(S['n_lens_resp'])} sims; blank: within 2 sd of 0)",
+                 fontsize=11)
+    fig.colorbar(im, ax=ax, fraction=0.04, label=unit)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_lensing_dipole(S, path):
+    """What lensing at each L' does to the velocity estimates.  Left: how
+    strongly lensing modes at L' move each hardened velocity estimate,
+    relative to how a lensing dipole (L' = 1, the same deflection as
+    aberration) moves the aberration estimate; without a mask only L' = 1
+    does, and the modulation estimate, hardened against aberration, not at
+    all.  Right: the per-component rms velocity
+    that lensing at L' adds, weighted by C_L'^phiphi, against each estimate's
+    scatter per sim and the input speed.  C_1^phiphi = 0, so L' = 1 adds
+    nothing.  Errors: jackknife over the lensing-response sims.  S is
+    load(summary, "system") plus sd (estimate -> per-sim sd of v [km/s])."""
+    order = ("aberration", "modulation", "joint")
+    Lp = np.arange(1, S["lens_sigma"].shape[1] + 1)
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(15, 4.8),
+                                   layout="constrained")
+    for k, e in enumerate(order):
+        dx = (k - 1) * 0.12
+        c, ce = S["lens_coupling"][k], S["lens_coupling_err"][k]
+        ax0.errorbar(Lp + dx, c, yerr=ce, fmt="o", ms=7, capsize=3,
+                     color=COLOURS[e], label=TITLES[e])
+        sg, se = S["lens_sigma"][k][1:], S["lens_sigma_err"][k][1:]
+        ax1.errorbar(Lp[1:] + dx, sg, yerr=se, fmt="o", ms=7, capsize=3,
+                     color=COLOURS[e],
+                     label=f"{TITLES[e]}: total "
+                           f"{np.sqrt((S['lens_sigma'][k] ** 2).sum()):.1f} km/s")
+        ax1.axhline(np.mean(S["sd"][e]), color=COLOURS[e], ls="--", lw=1.2)
+    ax1.axhline(np.linalg.norm(S["v_true"]), color=TRUTH, lw=1.5,
+                label="input speed")
+    ax1.plot([], [], color="0.5", ls="--", label="scatter of one sim")
+    ax0.set_ylim(bottom=0)
+    ax1.set_yscale("symlog", linthresh=0.1)            # zeros stay visible
+    ax1.set_ylim(bottom=0)
+    for ax in (ax0, ax1):
+        ax.set_xticks(Lp)
+        ax.set_xlabel("lensing multipole $L'$")
+    ax0.set_ylabel("|velocity per unit $\\phi_{L'M'}$|, relative to\n"
+                   "a lensing dipole in the aberration estimate")
+    ax0.set_title("leak of lensing modes into the dipole")
+    ax1.set_ylabel("rms velocity added, per component [km/s]")
+    ax1.set_title(r"velocity scatter from lensing ($C_1^{\phi\phi}$ = 0)")
+    ax0.legend(fontsize=9)
+    ax1.legend(fontsize=9, loc="upper left", bbox_to_anchor=(1.01, 1))
+    fig.suptitle(f"Lensing and the reconstructed dipole "
+                 f"({int(S['n_lens_resp'])} lensing-response sims)")
+    fig.savefig(path)
+    plt.close(fig)
+
+
 def plot_leakage(S, path):
     """Coherent power the true boost (both effects) leaves at each L of this
     estimator, from the paired response sims (+- 1 and 2 jackknife sd), with
@@ -769,6 +893,10 @@ def write_report(summary, path):
         "aberration": "aberration only (modulation estimate should read 0)",
         "modulation": "modulation only (aberration estimate should read 0)",
     }[boost] + " |")
+    w("| CMB (`--cmb`) | " + ("lensed: φ drawn from CAMB's C_L^φφ, lensed "
+                             "with pixell, then boosted; lensed spectra in "
+                             "the filters" if str(S.get("cmb", "unlensed"))
+                             == "lensed" else "unlensed") + " |")
     w(f"| modulation factor | b = {float(S['b_nu']):.4f} at "
       f"{float(S['freq']) / 1e9:g} GHz |")
     w(f"| aberration estimator | lensing quadratic estimator, {S['aber_case']} |")
@@ -956,6 +1084,36 @@ def write_report(summary, path):
           f"{A_h.std(ddof=1) / np.sqrt(n_d):.4f} | {A_u.mean():+.4f} ± "
           f"{A_u.std(ddof=1) / np.sqrt(n_d):.4f} |")
 
+    if "lens_V" in sy:
+        nl_ = int(sy["n_lens_resp"])
+        w("\n## Lensing and the dipole (`lensing_dipole.png`, "
+          "`*/lensing_response.png`)\n")
+        w(f"From {nl_} lensing-response sims: each noise-free CMB lensed by "
+          "one real lensing mode φ_L'M' at a time (L' = 1–"
+          f"{int(np.max(sy['phi_modes'][:, 0]))}), with amplitude "
+          "+ε and −ε, and [rec(+ε) − rec(−ε)] / 2ε, a central difference that "
+          "cancels the estimator's second-order term.  Without a mask each "
+          "estimator responds "
+          "only at L = L'; a mask mixes L, so lensing at L' ≥ 2 leaks into the "
+          "reconstructed dipole.  Weighted by C_L'^φφ that gives the rms "
+          "velocity lensing adds to each estimate (per component; errors by "
+          "jackknife over the lensing-response sims).  C_1^φφ = 0: a lensing "
+          "dipole would be a uniform deflection, the same as aberration.\n")
+        w("Check: the L' = 1 lensing modes against the aberration columns of "
+          "K (a lensing dipole φ = −u·n is aberration by u), |difference| / "
+          "|column|: " + ", ".join(f"{c:.3f}" for c in sy["lens_check"])
+          + ".\n")
+        Lp = range(1, sy["lens_sigma"].shape[1] + 1)
+        w("| estimate | " + " | ".join(f"L' = {L}" for L in Lp)
+          + " | total | sd of one sim |\n|---|" + "---|" * (len(Lp) + 2))
+        for k, e in enumerate(("aberration", "modulation", "joint")):
+            w(f"| {TITLES[e]} | " + " | ".join(
+                f"{sy['lens_sigma'][k][j]:.1f} ± "
+                f"{sy['lens_sigma_err'][k][j]:.1f}" for j in range(len(Lp)))
+              + f" | {np.sqrt((sy['lens_sigma'][k] ** 2).sum()):.1f} | "
+              f"{np.mean(E[e]['stat_sd'][1:4]):.0f} |")
+        w("\n(km/s, per velocity component.)")
+
     w("\n## Aberration amplitude for each lensing combination\n")
     w("The separate aberration estimate (solved with the modulation "
       "estimator) for each choice of lensing estimators.\n")
@@ -1005,14 +1163,24 @@ def make_all(summary, outdir=None):
         S = load(summary, name)
         S["mf_over_u"] = mf_over_u(load(summary, "system"))[
             ("aberration", "modulation").index(name)]
-        if "mf_map" in S:                      # summaries from before lack it
-            save(plot_meanfield_map, S,
-                 os.path.join(outdir, name, "meanfield_map.png"))
+        if "dat_map" in S:                     # summaries from before lack it
+            save(plot_maps_mean, S,
+                 os.path.join(outdir, name, "meanfield_map_mean.png"))
+            save(plot_maps_one_sim, S,
+                 os.path.join(outdir, name, "meanfield_map_one_sim.png"))
         else:
-            print(f"skipped {name}/meanfield_map.png: {summary} has no maps.  "
-                  "It was written by a boost_act.py older than the map "
-                  "change; rerun the current boost_act.py with the same "
-                  "options (it reuses the cached sims)")
+            print(f"skipped {name}/meanfield_map_*.png: {summary} has no data "
+                  "maps.  It was written by an older boost_act.py; rerun the "
+                  "current one with the same options (it reuses the cached "
+                  "sims)")
+    sy = load(summary, "system")
+    if "lens_V" in sy:                         # --cmb lensed runs only
+        for name in ("aberration", "modulation"):
+            save(plot_lensing_response, {**sy, "name": name},
+                 os.path.join(outdir, name, "lensing_response.png"))
+        save(plot_lensing_dipole,
+             {**sy, "sd": {e: load(summary, e)["stat_sd"][1:4] for e in TITLES}},
+             os.path.join(outdir, "lensing_dipole.png"))
     save(plot_comparison, [load(summary, n) for n in TITLES],
          os.path.join(outdir, "comparison.png"))
     write_report(summary, os.path.join(outdir, "report.md"))

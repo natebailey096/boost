@@ -26,6 +26,24 @@ Each job makes and caches the sims i with i % nshards == shard.  When all
 have finished, run once more without --shard/--nshards: that run makes any
 sims still missing and writes the complete report and figures.
 
+--cmb lensed lenses every sim first: an unlensed CMB and a lensing potential
+phi, drawn from CAMB's C_L^phiphi (C_1 = 0: a lensing dipole would be a
+uniform deflection, the same as aberration), are combined with
+pixell.lensing.lens_map_curved, and the result is then boosted and given
+noise as before.  The filters and weights use the lensed spectra.  It has its
+own cache tag, <mask>_<noise>_lensed.  It also adds a lensing response,
+measured like the boost response: each of --n-lens-response noise-free CMB
+sims is lensed by one real harmonic phi_{L'M'} at a time (L' = 1 to
+--lens-lmax, default 5), with amplitude +eps and -eps, and reconstructed;
+[rec(+eps) - rec(-eps)] / 2 eps is how that lensing mode moves each
+reconstructed (L, M).  The difference is
+central because the estimator's own quadratic term, Q(dT, dT), is second
+order in eps and only a central difference cancels it; one-sided it would
+bias the response by ~l eps, ~15% per sim at l ~ 3000.  Without a mask it is
+diagonal; with one, lensing at L' >= 2 leaks into the dipole.  Weighted by
+C_L^phiphi it gives the scatter lensing adds to each velocity estimate
+(lensing_dipole.png, and lensing_response.png per estimator).
+
 --boost aberration or --boost modulation applies only that effect to the
 data sims (the default, full, applies both), to check that each estimator
 recovers its own effect and that hardening removes the other: the expected
@@ -136,6 +154,20 @@ parser.add_argument("--boost", default="full",
                          "own effect.  Mean-field and response sims are "
                          "shared; the data sims and the summary and plots "
                          "are kept separately")
+parser.add_argument("--cmb", default="unlensed", choices=["unlensed", "lensed"],
+                    help="lensed: lens every sim with a phi drawn from "
+                         "C_L^phiphi before the boost; cached under its own "
+                         "tag, <mask>_<noise>_lensed")
+parser.add_argument("--n-lens-response", type=int, default=10,
+                    help="--cmb lensed only: CMB sims for the lensing "
+                         "response, each reconstructed 2((Lmax + 1)^2 - 1) "
+                         "times (70 for --lens-lmax 5): lensed by +eps and "
+                         "-eps of each mode phi_LM, 1 <= L <= Lmax")
+parser.add_argument("--lens-lmax", type=int, default=5,
+                    help="--cmb lensed only: highest multipole L' of the "
+                         "lensing modes in the lensing response.  Raising it "
+                         "shows whether higher L' still add; modes already "
+                         "cached are reused")
 parser.add_argument("--n-meanfield", type=int, default=800)
 parser.add_argument("--n-response", type=int, default=60)
 parser.add_argument("--n-data", type=int, default=400)
@@ -152,7 +184,7 @@ import healpy as hp                                            # noqa: E402
 import camb                                                    # noqa: E402
 import pytempura                                               # noqa: E402
 from falafel import qe                                         # noqa: E402
-from pixell import (enmap, curvedsky, aberration, reproject,   # noqa: E402
+from pixell import (enmap, curvedsky, aberration, reproject, lensing,  # noqa: E402
                     utils)
 
 # qe_mask and the lensing QE are taken from the screening branches, whose
@@ -168,6 +200,7 @@ if not (hasattr(pytempura, "norm_tau") and hasattr(qe, "qe_tau_pol")):
 # The falafel branch passes tweak=True to map2alm, which pixell 0.32 ignores
 # and warns about on every call.
 warnings.filterwarnings("ignore", message="The tweak argument is deprecated")
+warnings.filterwarnings("ignore", message="In the future, the default will be")
 
 # ---------------------------------------------------------------- settings
 LMIN, LMAX, MLMAX = 600, 3000, 3500
@@ -185,7 +218,9 @@ AXES = [(0.0, 0.0), (np.pi / 2, 0.0), (0.0, np.pi / 2)]   # x, y, z as (ra, dec)
 EST = ["TT", "TE", "EE"]
 CASES = {"TT": ["TT"], "TE": ["TE"], "EE": ["EE"], "T+P": EST}
 ABER_CASE = "T+P"                         # lensing combination used for u_aber
-CACHE_TAG = f"{args.mask}_{args.noise}"   # new value whenever a setting changes
+LENSED = args.cmb == "lensed"
+CACHE_TAG = (f"{args.mask}_{args.noise}"  # new value whenever a setting changes
+             + ("_lensed" if LENSED else ""))
 CACHE = os.path.join("cache_boost", CACHE_TAG)     # summary.npz and plots/
 SIMS = os.path.join(CACHE, "sims")                 # one .npy per sim
 # Effects applied to the data sims, the data sims' label, and where this
@@ -225,10 +260,24 @@ if not IN_WORKER:
     print("CAMB ...", flush=True)
 pars = camb.set_params(H0=67.5, ombh2=0.022, omch2=0.122, ns=0.965,
                        As=2.1e-9, tau=0.06)
-pars.set_for_lmax(MLMAX + 500)
-cls = camb.get_results(pars).get_cmb_power_spectra(
-    pars, raw_cl=True, spectra=["unlensed_scalar"])["unlensed_scalar"]
-cltt, clee, clbb, clte = cls[:MLMAX + 1].T          # dimensionless (dT/T)^2
+if LENSED:
+    pars.set_for_lmax(MLMAX + 500, lens_potential_accuracy=1)
+else:                                     # as before, so old caches stay valid
+    pars.set_for_lmax(MLMAX + 500)
+camb_res = camb.get_results(pars)
+cls = camb_res.get_cmb_power_spectra(
+    pars, raw_cl=True, spectra=["unlensed_scalar", "lensed_scalar"])
+# The sims are drawn from the unlensed spectra (and lensed, with --cmb
+# lensed); the filters and weights use what the sky looks like, the lensed
+# spectra in that case.
+un_tt, un_ee, un_bb, un_te = cls["unlensed_scalar"][:MLMAX + 1].T
+cltt, clee, clbb, clte = cls["lensed_scalar" if LENSED else
+                             "unlensed_scalar"][:MLMAX + 1].T   # (dT/T)^2
+CLPP = np.zeros(MLMAX + 1)                # lensing potential C_L^phiphi
+if LENSED:
+    _pp = camb_res.get_lens_potential_cls(lmax=MLMAX)[:, 0]
+    _L = np.arange(2, MLMAX + 1.0)
+    CLPP[2:] = 2 * np.pi * _pp[2:] / (_L * (_L + 1)) ** 2   # C_0 = C_1 = 0
 
 ell = np.arange(MLMAX + 1.0)
 bl2 = hp.gauss_beam(BEAM * utils.arcmin, lmax=MLMAX) ** 2
@@ -273,9 +322,9 @@ if not np.allclose(amp_norm, tau_norm, rtol=1e-8, atol=0):
                      f"{tau_norm} disagree; check the tempura build")
 NORM["MOD"] = np.concatenate([[0.0], amp_norm])
 
-PS_CMB = np.zeros((3, 3, MLMAX + 1))
-PS_CMB[0, 0], PS_CMB[1, 1], PS_CMB[2, 2] = cltt, clee, clbb
-PS_CMB[0, 1] = PS_CMB[1, 0] = clte
+PS_CMB = np.zeros((3, 3, MLMAX + 1))        # unlensed: what the sims draw
+PS_CMB[0, 0], PS_CMB[1, 1], PS_CMB[2, 2] = un_tt, un_ee, un_bb
+PS_CMB[0, 1] = PS_CMB[1, 0] = un_te
 PS_NOISE = np.zeros((3, 3, MLMAX + 1))
 PS_NOISE[0, 0], PS_NOISE[1, 1], PS_NOISE[2, 2] = nltt, nlee, nlee
 
@@ -340,8 +389,58 @@ def lowl_map(packed):
                       ) * C_KMS
 
 
+PHI_SEED = 1_000_000_000      # phi of sim seed s is drawn with PHI_SEED + s
+
+
+def lens(alm, phi_alm):
+    """TEB alm lensed by phi: T(n + grad phi), on geodesics, as a TQU map."""
+    return lensing.lens_map_curved((3,) + shape, wcs, phi_alm, alm,
+                                   output="l")[0]
+
+
+def unlensed_alm(seed):
+    """The TEB alm the unlensed run's rand_map draws for this seed, so that
+    a lensed sim is the unlensed run's sim of the same seed, lensed."""
+    return curvedsky.rand_alm_healpy(PS_CMB, lmax=MLMAX, seed=seed)
+
+
 def cmb(seed):
-    return curvedsky.rand_map((3,) + shape, wcs, PS_CMB, lmax=MLMAX, seed=seed)
+    """TQU CMB of one seed; with --cmb lensed, lensed by its own phi, drawn
+    from the same seed so that every leg of a response sim shares it."""
+    if not LENSED:
+        return curvedsky.rand_map((3,) + shape, wcs, PS_CMB, lmax=MLMAX,
+                                  seed=seed)
+    alm = unlensed_alm(seed)
+    phi = curvedsky.rand_alm(CLPP, lmax=MLMAX, seed=PHI_SEED + seed)
+    return lens(alm, phi)
+
+
+# Lensing response: one real harmonic of the lensing potential at a time,
+# phi = eps_L Y_LM, L = 1..LPHI, M = -L..L, in the real basis of the plots
+# (r_L0 = a_L0, r_LM = sqrt2 (-1)^M Re a_LM, r_L,-M = -sqrt2 (-1)^M Im a_LM).
+# eps_L makes the rms deflection a tenth of the aberration's (beta sqrt(2/3)),
+# small enough to stay linear.
+LPHI = args.lens_lmax
+PHI_MODES = [(L, M) for L in range(1, LPHI + 1) for M in range(-L, L + 1)]
+PHI_EPS = {L: 0.1 * BETA * np.sqrt(2 / 3) / np.sqrt(L * (L + 1) / (4 * np.pi))
+           for L in range(1, LPHI + 1)}
+
+
+def real_mode_alm(L, M, lmax):
+    """alm (healpy order, lmax) of the unit real harmonic Y_LM."""
+    a = np.zeros(hp.Alm.getsize(lmax), complex)
+    k = hp.Alm.getidx(lmax, L, abs(M))
+    a[k] = (1.0 if M == 0 else (-1) ** M / np.sqrt(2) if M > 0
+            else -1j * (-1) ** abs(M) / np.sqrt(2))
+    return a
+
+
+def lensed_by_mode(seed, mode, sign):
+    """Noise-free unlensed CMB of seed lensed by sign * eps_L Y_LM, for
+    mode (L, M) and sign +1 or -1."""
+    alm = unlensed_alm(seed)
+    L, M = mode
+    return lens(alm, sign * PHI_EPS[L] * real_mode_alm(L, M, L))
 
 
 def noise(seed):
@@ -394,8 +493,12 @@ def move_old_sims():
 BASE = "unboosted"
 EFFECTS = ("aberration", "modulation")
 RESP_LABELS = [f"{effect} {axis}" for effect in EFFECTS for axis in "xyz"]
+# Lensing-response legs (--cmb lensed): each mode at +eps and -eps.
+# Files phi_2_-1_p_XXXX.npy, phi_2_-1_m_XXXX.npy, ...
+PHI_LABELS = [f"phi {L} {M:+d} {s}" for L, M in PHI_MODES for s in "pm"]
 STAGE = {"mf": "mf", DATA: "data", BASE: "response",
-         **{l: "response" for l in RESP_LABELS}}
+         **{l: "response" for l in RESP_LABELS},
+         **{l: "lensing response" for l in PHI_LABELS}}
 TODO = {}           # sims this run still has to make, per label (set in main)
 
 
@@ -406,11 +509,17 @@ def one_sim(label, i):
       <effect> <axis>  the same CMB boosted by +BETA along the axis, with
                   aberration only or modulation only (response)
       data        CMB with the full boost + noise
-      data <effect>  the same CMB with that effect only + the same noise"""
+      data <effect>  the same CMB with that effect only + the same noise
+      phi L M p/m  noise-free CMB lensed by +eps or -eps of one lensing
+                  mode (lensing response, --cmb lensed)"""
     if label == "mf":
         return reconstruct(cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i))
     if label == BASE:
         return reconstruct(cmb(2_000_000 + i))
+    if label.startswith("phi"):
+        _, L, M, sign = label.split()
+        return reconstruct(lensed_by_mode(2_000_000 + i, (int(L), int(M)),
+                                          1 if sign == "p" else -1))
     if label.startswith("data"):
         return reconstruct(boost(cmb(3_000_000 + 2 * i), BDIR, BETA,
                                  aberrate=ABERRATE, modulate=MODULATE)
@@ -636,6 +745,80 @@ def solve(names, mf, diff, dat):
     return Y, K, Kerr, m, C, est
 
 
+def lens_response(dphi, mf, diff, dat):
+    """What lensing does to the estimates, from the lensing-response sims.
+    dphi is (mode, sim, 4, npack): the change in the raw reconstructions per
+    unit coefficient of each real lensing mode phi_{L'M'} (PHI_MODES).
+      lens_R_ab, lens_R_mod  (mode, npack) mean response of each estimator's
+                 (L, M) to each mode: phi-hat per phi for the lensing
+                 estimator, f-hat per phi for the modulation one.  Without a
+                 mask the first is the identity and the second zero.
+      lens_V     (estimate, mode, 3) the hardened velocity (u units) a unit
+                 phi_{L'M'} puts into the aberration, modulation and joint
+                 estimates: K^-1 or G applied to the dipoles it produces.
+      lens_sigma (estimate, L') per-component rms velocity [km/s] that
+                 lensing at L' adds, sqrt(C_L' sum_M' |V|^2 / 3), with |V|^2
+                 less its Monte Carlo noise (which would bias it up); errors
+                 by jackknife over the lensing-response sims.
+      lens_coupling (estimate, L') rms |V| over M' at L' (debiased the same
+                 way), relative to the aberration estimate's response to a
+                 lensing dipole (L' = 1): how strongly each L' leaks into
+                 the dipole (0 for L' >= 2 without a mask).
+      lens_check (3,) the L' = 1 modes against the aberration columns of K,
+                 |difference| / |K column|: a lensing dipole phi = -u.n is
+                 the same deflection as aberration by u."""
+    names = (ABER_CASE, "MOD")
+    _, y_mf, _, K, _ = system(names, mf, diff, dat)
+    maps = linear_maps(K, y_mf)
+    est = [est_alm(dphi, n) for n in names]           # (mode, sim, npack)
+    y6 = np.concatenate([l1_vector(e) for e in est], -1)    # (mode, sim, 6)
+    n = y6.shape[1]
+    modes = np.array(PHI_MODES)
+    cl = CLPP[modes[:, 0]]
+    order = ("aberration", "modulation", "joint")
+
+    def scatter(y):
+        """y (mode, sim, 6) -> V, sigma, coupling, with |mean V|^2 less
+        its Monte Carlo noise var(V) / n_sim."""
+        Vs = np.stack([y @ maps[e].T for e in order])   # (est, mode, sim, 3)
+        V = Vs.mean(axis=2)
+        p = (V ** 2).sum(-1) - Vs.var(axis=2, ddof=1).sum(-1) / Vs.shape[2]
+        by_L = [modes[:, 0] == L for L in range(1, LPHI + 1)]
+        sig = C_KMS * np.array([[np.sqrt(max((cl * p[k])[b].sum() / 3, 0))
+                                 for b in by_L] for k in range(3)])
+        rms = np.array([[np.sqrt(max(p[k][b].mean(), 0)) for b in by_L]
+                        for k in range(3)])
+        return V, sig, rms / rms[0, 0]
+
+    V, sig, coup = scatter(y6)
+    jk = [scatter(np.delete(y6, j, axis=1)) for j in range(n)]
+    sig_err = np.sqrt((n - 1) * np.var([j[1] for j in jk], axis=0))
+    coup_err = np.sqrt((n - 1) * np.var([j[2] for j in jk], axis=0))
+    check = []
+    for k, (L, M) in enumerate(PHI_MODES):
+        if L == 1:
+            a = real_mode_alm(1, M, LOUT)[hp.Alm.getidx(LOUT, PACK_L, PACK_M)]
+            pred = K[:, :3] @ -l1_vector(a)           # phi = a.n = -u.n
+            check.append(np.linalg.norm(y6[k].mean(axis=0) - pred)
+                         / np.linalg.norm(pred))
+    R = {"ab": -est[0], "mod": B_NU * est[1]}         # phi-hat, f-hat per phi
+    print(f"\nlensing response from {n} sims, modes L' = 1..{LPHI}")
+    print("   L' = 1 against the aberration columns of K: "
+          + ", ".join(f"{c:.3f}" for c in check))
+    for k, e in enumerate(order):
+        print(f"   {e:10s} velocity scatter from lensing [km/s], L' = 1..{LPHI}: "
+              + "  ".join(f"{x:.1f}" for x in sig[k])
+              + f"   total {np.sqrt((sig[k] ** 2).sum()):.1f}")
+    return dict(phi_modes=modes, phi_eps=np.array([PHI_EPS[L] for L, M in
+                                                    PHI_MODES]),
+                n_lens_resp=n, lens_V=V, lens_sigma=sig,
+                lens_sigma_err=sig_err, lens_coupling=coup,
+                lens_coupling_err=coup_err, lens_check=np.array(check),
+                **{f"lens_R_{k}": r.mean(axis=1) for k, r in R.items()},
+                **{f"lens_R_{k}_sd": np.abs(r.std(axis=1, ddof=1))
+                   for k, r in R.items()})
+
+
 def analyse(mf, diff, dat):
     Y, K, Kerr, m, C, est = solve((ABER_CASE, "MOD"), mf, diff, dat)
     # Leave-one-response-sim-out copies of K, for the figures' errors on
@@ -678,7 +861,9 @@ def analyse(mf, diff, dat):
                         U_TRUE) / D.shape[2]
         out[name].update(mf_map=lowl_map(Y[i][0].mean(axis=0)),
                          sim_map=lowl_map(Y[i][0][0]),
-                         signal_map=lowl_map(sig))
+                         signal_map=lowl_map(sig),
+                         dat_map=lowl_map(Y[i][2].mean(axis=0)),
+                         dat_sim_map=lowl_map(Y[i][2][0]))
     sd = np.sqrt(np.diag(C))
     # For the figures only: the copies of K, and the joint linear map G with
     # its copies (weights recomputed for each), so the plots can show errors
@@ -715,13 +900,17 @@ def main():
           f"dec {np.degrees(BDIR[1]):.2f}; modulation b = {B_NU:.4f} at "
           f"{FREQ / 1e9:g} GHz", flush=True)
 
+    print(f"CMB {args.cmb}" + (f": phi from C_L^phiphi, lensed with pixell; "
+          f"{args.n_lens_response} lensing-response sims" if LENSED else ""))
     print(f"noise 1/f slopes T {ALPHA_T:g}, P {ALPHA_P:g}; cache {CACHE}/"
           + (f"; shard {args.shard} of {args.nshards}" if args.nshards > 1
              else ""))
     os.makedirs(SIMS, exist_ok=True)
     move_old_sims()
+    n_lens = args.n_lens_response if LENSED else 0
     counts = {"mf": args.n_meanfield, DATA: args.n_data,
-              BASE: args.n_response, **{l: args.n_response for l in RESP_LABELS}}
+              BASE: args.n_response, **{l: args.n_response for l in RESP_LABELS},
+              **{l: n_lens for l in PHI_LABELS}}
     TODO.update({l: sum(not os.path.exists(cache_path(l, i))
                         for i in range(args.shard, n, args.nshards))
                  for l, n in counts.items()})
@@ -743,6 +932,10 @@ def main():
             run(label, args.n_response)
         print("\n[C] data")
         run(DATA, args.n_data)
+        if n_lens:
+            print("\n[D] lensing response")
+            for label in PHI_LABELS:
+                run(label, n_lens)
     finally:
         if POOL:
             POOL.terminate()
@@ -763,6 +956,15 @@ def main():
     if counts != (args.n_meanfield, args.n_response, args.n_data):
         print("partial: the report and figures cover the sims cached so far")
     results = analyse(mf, diff, dat)
+    if n_lens:
+        phi = collect(PHI_LABELS, n_lens)          # (70, sim, 4, npack)
+        if phi.shape[1] >= 2:
+            eps = np.array([PHI_EPS[L] for L, M in PHI_MODES])
+            results["system"].update(lens_response(
+                (phi[0::2] - phi[1::2]) / (2 * eps[:, None, None, None]),
+                mf, diff, dat))
+        else:
+            print("lensing response: too few sims cached yet")
 
     out = dict(v_true=C_KMS * U_TRUE, d_true=D_TRUE, beta=BETA, b_nu=B_NU,
                freq=FREQ, res_arcmin=RES / utils.arcmin,
@@ -776,7 +978,8 @@ def main():
                alpha=[ALPHA_T, ALPHA_P], tcmb=TCMB,
                cl_tt=cltt, cl_ee=clee, nl_tt=nltt, nl_ee=nlee,
                pack_l=PACK_L, pack_m=PACK_M, fsky=W1, w2=W2,
-               aber_case=ABER_CASE, boost=args.boost,
+               aber_case=ABER_CASE, boost=args.boost, cmb=args.cmb,
+               clpp_low=CLPP[:LPHI + 1],
                map_dec=np.degrees(enmap.posaxes(MAP_SHAPE, MAP_WCS)[0]),
                map_ra=np.degrees(enmap.posaxes(MAP_SHAPE, MAP_WCS)[1]))
     if MASK is not None:
