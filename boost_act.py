@@ -29,9 +29,11 @@ sims still missing and writes the complete report and figures.
 --cmb lensed lenses every sim first: an unlensed CMB and a lensing potential
 phi, drawn from CAMB's C_L^phiphi (C_1 = 0: a lensing dipole would be a
 uniform deflection, the same as aberration), are combined with
-pixell.lensing.lens_map_curved, and the result is then boosted and given
-noise as before.  The filters and weights use the lensed spectra.  It has its
-own cache tag, <mask>_<noise>_lensed.  It also adds a lensing response,
+pixell.lensing.lens_map_curved (pixell 0.32.9 or later: earlier versions
+get pixels deflected over a pole and the polarization rotation wrong), and
+the result is then boosted and given noise as before.  The filters and
+weights use the lensed spectra.  It has its own cache tag,
+<mask>_<noise>_lensed.  It also adds a lensing response,
 measured like the boost response: each of --n-lens-response noise-free CMB
 sims is lensed by one real harmonic phi_{L'M'} at a time (L' = 1 to
 --lens-lmax, default 5), with amplitude +eps and -eps, and reconstructed;
@@ -103,6 +105,24 @@ full-sky normalisations, and the mask is dealt with by simulation:
                separate estimate is unbiased for the same u, so any weights
                that sum to 1 are; these are the inverse-variance ones when
                the two are uncorrelated.  The 6x6 covariance is not used.
+    *_all      the same three from every reconstructed mode L <= LOUT of both
+               estimators, not only the dipoles: generalised least squares
+               with their covariance over the mean-field sims, which holds
+               the lensing at every L' (in a lensed run), the mean field's
+               scatter and the mask's coupling of the noise.  With the
+               dipoles alone it is the estimate above.  Needs n_mf well
+               above the number of modes (70).  Report only: on a partial
+               sky the boost and low-L lensing leave nearly the same
+               imprint on these modes, so it gains little (tested).
+    *_lens     (--cmb lensed) the dipole estimates less the leakage of each
+               data sim's own lensing modes phi_L'M', L' <= --lens-lmax,
+               predicted with the lensing response: u - sum V_L'M' phi_L'M'.
+               phi is known in a simulation; for the sky it would have to
+               come from outside these data (a full-sky lensing map), so
+               this is the most such a map could give
+               (amplitude_direction_lens.png).  Each data sim's modes are
+               cached as lensphi_XXXX.npy (~0.5 s each to draw, with
+               --nproc in parallel).
 
 The error on a mean is sd / sqrt(n_data), the scatter of the data sims
 alone.  The Monte Carlo errors of the mean field and of K are shared by every
@@ -182,8 +202,10 @@ args = parser.parse_args()
 
 import healpy as hp                                            # noqa: E402
 import camb                                                    # noqa: E402
+import pixell                                                  # noqa: E402
 import pytempura                                               # noqa: E402
 from falafel import qe                                         # noqa: E402
+from packaging.version import Version                          # noqa: E402
 from pixell import (enmap, curvedsky, aberration, reproject, lensing,  # noqa: E402
                     utils)
 
@@ -238,7 +260,7 @@ D_TRUE = np.array([np.cos(BDIR[1]) * np.cos(BDIR[0]),
 U_TRUE = BETA * D_TRUE
 GAL = hp.Rotator(coord=["C", "G"]).mat    # equatorial -> galactic vectors
 
-# pixell's interpol_map (0.32.7 and master) doubles a full-sky map for the
+# pixell's interpol_map (0.32.7 to 0.32.9) doubles a full-sky map for the
 # NUFFT by flipping ra where it should flip dec.  The seam this leaves at the
 # poles rings: 26% of the map rms in the polar rows, ~5e-4 at |dec| < 62.
 # Doubling the map here makes the boost exact to 1e-11.
@@ -253,6 +275,17 @@ def _interpol_fixed(imap, pixs, epsilon=None, nthread=None, ydouble=False):
 
 
 aberration.interpol_map = _interpol_fixed
+
+# pixell up to 0.32.7 lenses each pixel along a geodesic with an arcsin for
+# the change in longitude.  For a pixel deflected over a pole that gives the
+# wrong position, or NaN, which the SHT rejects ("phi out of range: -nan",
+# mean-field sim 32 at full resolution); and its polarization rotation is
+# wrong, by ~1% of Q, U at |dec| < 63 deg for a 34' deflection.  0.32.9
+# (master) does both with ducc0 and lensing by a dipole then matches
+# aberration in T, Q and U alike.
+if LENSED and Version(pixell.__version__) < Version("0.32.9"):
+    raise SystemExit(f"--cmb lensed needs pixell 0.32.9 or later (found "
+                     f"{pixell.__version__}):  pip install --upgrade pixell")
 
 # ---------------------------------------------------------------- spectra
 IN_WORKER = __name__ == "__mp_main__"       # a spawned --nproc worker
@@ -443,6 +476,26 @@ def lensed_by_mode(seed, mode, sign):
     return lens(alm, sign * PHI_EPS[L] * real_mode_alm(L, M, L))
 
 
+# The lensing modes L' <= LENSPHI_L of each data sim's own phi, in the real
+# basis of PHI_MODES (ordered as it is, so its first len(PHI_MODES) entries
+# are those modes), cached as lensphi_XXXX.npy: what amplitude_direction_lens
+# subtracts the predicted leakage of.  The same draw as cmb() makes.
+LENSPHI_L = max(10, LPHI)
+
+
+def lens_modes(seed):
+    """Real-basis coefficients of the phi that cmb(seed) lenses by, for
+    1 <= L' <= LENSPHI_L."""
+    a = curvedsky.rand_alm(CLPP, lmax=MLMAX, seed=PHI_SEED + seed)
+    r = []
+    for L in range(1, LENSPHI_L + 1):
+        for M in range(-L, L + 1):
+            x = a[hp.Alm.getidx(MLMAX, L, abs(M))]
+            r.append(x.real if M == 0 else np.sqrt(2) * (-1) ** abs(M)
+                     * (x.real if M > 0 else -x.imag))
+    return np.array(r)
+
+
 def noise(seed):
     return curvedsky.rand_map((3,) + shape, wcs, PS_NOISE, lmax=MLMAX,
                               seed=seed)
@@ -496,7 +549,7 @@ RESP_LABELS = [f"{effect} {axis}" for effect in EFFECTS for axis in "xyz"]
 # Lensing-response legs (--cmb lensed): each mode at +eps and -eps.
 # Files phi_2_-1_p_XXXX.npy, phi_2_-1_m_XXXX.npy, ...
 PHI_LABELS = [f"phi {L} {M:+d} {s}" for L, M in PHI_MODES for s in "pm"]
-STAGE = {"mf": "mf", DATA: "data", BASE: "response",
+STAGE = {"mf": "mf", DATA: "data", "lensphi": "data", BASE: "response",
          **{l: "response" for l in RESP_LABELS},
          **{l: "lensing response" for l in PHI_LABELS}}
 TODO = {}           # sims this run still has to make, per label (set in main)
@@ -511,7 +564,11 @@ def one_sim(label, i):
       data        CMB with the full boost + noise
       data <effect>  the same CMB with that effect only + the same noise
       phi L M p/m  noise-free CMB lensed by +eps or -eps of one lensing
-                  mode (lensing response, --cmb lensed)"""
+                  mode (lensing response, --cmb lensed)
+      lensphi     not a reconstruction: the low-L lensing modes of data
+                  sim i (--cmb lensed)"""
+    if label == "lensphi":
+        return lens_modes(3_000_000 + 2 * i)
     if label == "mf":
         return reconstruct(cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i))
     if label == BASE:
@@ -712,6 +769,34 @@ def linear_maps(K, y_mf):
     return {"aberration": Kinv[:3], "modulation": Kinv[3:], "joint": G}
 
 
+def estimates(maps, K, y_mf, y_dat):
+    """Per-sim u from each linear map in maps (estimate -> rows applied to
+    the estimator vector y less its mean over the mean-field sims), with the
+    mean, sd and error on the mean of its statistics, and the split-half
+    null test.  K is the response of y to (u_ab, u_mod)."""
+    m = y_mf.mean(axis=0)
+    # What each estimate should average to for the effects applied: L K x,
+    # with x the true (u_ab, u_mod).  For the full boost this is u_in for
+    # all three; with one effect it is u_in or 0 for the separate estimates
+    # and that effect's share of the weights for the joint one.
+    x_true = np.r_[ABERRATE * U_TRUE, MODULATE * U_TRUE]
+    h = len(y_mf) // 2
+    null_y = y_mf[h:] - y_mf[:h].mean(axis=0)     # split-half null test
+    est = {}
+    for e in maps:
+        u_exp = maps[e] @ K @ x_true
+        u_exp[np.abs(u_exp) < 1e-9 * np.linalg.norm(U_TRUE)] = 0.0  # rounding
+        u = (y_dat - m) @ maps[e].T
+        st = stats(u)
+        sd = st.std(axis=0, ddof=1)
+        null = null_y @ maps[e].T @ U_TRUE / (U_TRUE @ U_TRUE)
+        est[e] = dict(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
+                      u_expect=u_exp,
+                      err=sd / np.sqrt(len(st)), null=null,
+                      null_err=null.std(ddof=1) * np.sqrt(1 / len(null) + 1 / h))
+    return est
+
+
 def solve(names, mf, diff, dat):
     """The three estimates of u from one pair of estimators, with the mean,
     sd and error on the mean of their per-sim statistics.  The error on the
@@ -720,29 +805,91 @@ def solve(names, mf, diff, dat):
     this leaves out: for the mean field about sqrt(n_data / n_mf) times this
     one, so it needs n_mf >> n_data to be negligible."""
     Y, y_mf, y_dat, K, Kerr = system(names, mf, diff, dat)
-    n_m = len(y_mf)
     m, C = y_mf.mean(axis=0), np.cov(y_mf, rowvar=False)
-    L = linear_maps(K, y_mf)
-    # What each estimate should average to for the effects applied: L K x,
-    # with x the true (u_ab, u_mod).  For the full boost this is u_in for
-    # all three; with one effect it is u_in or 0 for the separate estimates
-    # and that effect's share of the weights for the joint one.
-    x_true = np.r_[ABERRATE * U_TRUE, MODULATE * U_TRUE]
-    h = n_m // 2
-    null_y = y_mf[h:] - y_mf[:h].mean(axis=0)     # split-half null test
-    est = {}
-    for e in L:
-        u_exp = L[e] @ K @ x_true
-        u_exp[np.abs(u_exp) < 1e-9 * np.linalg.norm(U_TRUE)] = 0.0  # rounding
-        u = (y_dat - m) @ L[e].T
-        st = stats(u)
-        sd = st.std(axis=0, ddof=1)
-        null = null_y @ L[e].T @ U_TRUE / (U_TRUE @ U_TRUE)
-        est[e] = dict(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
-                      u_expect=u_exp,
-                      err=sd / np.sqrt(len(st)), null=null,
-                      null_err=null.std(ddof=1) * np.sqrt(1 / len(null) + 1 / h))
+    est = estimates(linear_maps(K, y_mf), K, y_mf, y_dat)
     return Y, K, Kerr, m, C, est
+
+
+# ---------------------------------------- estimates from every mode L <= LOUT
+# The estimates above use only the reconstructed dipoles (L = 1, six numbers),
+# so whatever the mask, lensing and the noise put into the dipoles stays in
+# u.  Lensing at L' >= 2 leaks into the masked dipoles, but it also shows up,
+# much more strongly, at L = L' itself, and the mean field and the mask's
+# coupling of the noise are shared across L too.  The modes 2 <= L <= LOUT of
+# both estimators therefore carry information about what contaminates the
+# dipoles.  The estimates below use all of them, (LOUT + 1)^2 - 1 per
+# estimator (70 for LOUT = 5), weighted by their covariance C over the
+# mean-field sims, which are lensed in a lensed run, so C contains the
+# lensing at every L' as well as the noise:
+#     u = (A^T C^-1 A)^-1 A^T C^-1 (x - x_MF)       (generalised least squares)
+# with A the response of all the modes to (u_ab, u_mod), measured with the
+# response sims as K is.  Of all linear estimates from these modes that
+# recover u whatever its value, this has the smallest variance.  With the
+# dipoles alone A is K and this is K^-1, the estimate above.  The joint
+# estimate weights the two separate ones per axis as before.  The data sims
+# are not used to make the weights, so their scatter measures the result
+# honestly.
+# In tests at reduced resolution on a stand-in mask, even with the low-L
+# lensing raised 100x so that the modes L = 2-5 measure it at S/N ~2 per
+# mode, this gained ~9% in variance at best: aberration is itself a lensing
+# dipole, and on part of the sky it leaves nearly the same imprint on these
+# modes as lensing at L' = 2, 3, ... does, so they cannot tell the two apart.
+
+
+def all_modes(a, lmax):
+    """Packed alm (..., npack) -> the real vector of its modes 1 <= L <= lmax:
+    the L = 1 Cartesian vector (as K uses), then for each L >= 2 the real
+    harmonics a_L0, sqrt2 Re a_LM and sqrt2 Im a_LM (M > 0)."""
+    parts = [l1_vector(a)]
+    for L in range(2, lmax + 1):
+        for M in range(L + 1):
+            k = np.flatnonzero((PACK_L == L) & (PACK_M == M))[0]
+            parts.append((1.0 if M == 0 else np.sqrt(2)) * a[..., k:k + 1].real)
+            if M:
+                parts.append(np.sqrt(2) * a[..., k:k + 1].imag)
+    return np.concatenate(parts, -1)
+
+
+def system_all(names, mf, diff, dat, lmax):
+    """All modes 1 <= L <= lmax of two estimators, stacked, for the
+    mean-field and data sims, and their response A (rows: modes; columns:
+    aberration xyz then modulation xyz), whose L = 1 rows are K."""
+    Y = [[est_alm(x, n) for x in (mf, diff, dat)] for n in names]
+    x_mf, x_dat = (np.concatenate([all_modes(y[k], lmax) for y in Y], -1)
+                   for k in (0, 2))
+    V = np.concatenate([all_modes(y[1], lmax) for y in Y], -1) / BETA
+    return x_mf, x_dat, V.mean(axis=2).reshape(6, -1).T
+
+
+def gls_maps(A, x_mf):
+    """Generalised least squares from all the modes: P = (A^T C^-1 A)^-1
+    A^T C^-1, rows u_ab then u_mod, with C the modes' covariance over the
+    mean-field sims; and the joint map, the per-axis weighted average of
+    the two with w = s_mod^2 / (s_ab^2 + s_mod^2) on aberration (s their sd
+    over the mean-field sims), as for K^-1.  Returns the maps and w."""
+    C = np.cov(x_mf, rowvar=False)
+    CiA = np.linalg.solve(C, A)
+    P = np.linalg.solve(A.T @ CiA, CiA.T)
+    s2 = np.einsum("ij,jk,ik->i", P, C, P)
+    w = s2[3:] / (s2[:3] + s2[3:])
+    G = np.hstack([np.diag(w), np.diag(1 - w)]) @ P
+    return {"aberration": P[:3], "modulation": P[3:], "joint": G}, w
+
+
+def solve_all_modes(names, mf, diff, dat):
+    """The three estimates from all modes L <= LOUT (as solve() gives from
+    the dipoles), and the sd of their statistics when the modes are limited
+    to L <= 1, 2, ..., LOUT (L <= 1 is solve()'s estimate)."""
+    x_mf, x_dat, A = system_all(names, mf, diff, dat, LOUT)
+    n_mode = [2 * ((l + 1) ** 2 - 1) for l in range(1, LOUT + 1)]
+    by_l = []
+    for l, n in zip(range(1, LOUT + 1), n_mode):
+        keep = np.r_[0:n // 2, A.shape[0] // 2:A.shape[0] // 2 + n // 2]
+        maps, w = gls_maps(A[keep], x_mf[:, keep])
+        est = estimates(maps, A[keep], x_mf[:, keep], x_dat[:, keep])
+        by_l.append([[est[e][k] for k in ("mean", "sd", "err")]
+                     for e in ("aberration", "modulation", "joint")])
+    return est, w, A, np.array(by_l), np.array(n_mode)
 
 
 def lens_response(dphi, mf, diff, dat):
@@ -819,6 +966,36 @@ def lens_response(dphi, mf, diff, dat):
                    for k, r in R.items()})
 
 
+def lens_removed(mf, diff, dat, lens_V):
+    """The three dipole estimates of each data sim less the leakage of its
+    own lensing modes L' <= LPHI predicted by the lensing response,
+    u - sum_L'M' V_L'M' phi_L'M' (amplitude_direction_lens.png).  Every
+    term has zero mean, so the expected values stay as they were; so does
+    the null test, on the mean-field sims.  The sims' phi is read from
+    lensphi_XXXX.npy; missing ones (other shards) leave this out."""
+    idx = [i for i in range(args.n_data) if os.path.exists(cache_path(DATA, i))]
+    if not all(os.path.exists(cache_path("lensphi", i)) for i in idx):
+        print("lensing removed: the lensing modes of some data sims are not "
+              "cached yet; run the remaining shards")
+        return {}
+    r = np.array([np.load(cache_path("lensphi", i)) for i in idx])
+    r = r[:, :len(PHI_MODES)]
+    est = solve((ABER_CASE, "MOD"), mf, diff, dat)[5]
+    out = {}
+    print(f"\nwith the leakage of each data sim's lensing modes L' <= {LPHI} "
+          "removed (phi known, as from a perfect external lensing map)")
+    for k, name in enumerate(("aberration", "modulation", "joint")):
+        e = dict(est[name])
+        u = e["u"] - r @ lens_V[k]
+        st = stats(u)
+        sd = st.std(axis=0, ddof=1)
+        e.update(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
+                 err=sd / np.sqrt(len(st)))
+        out[f"{name}_lens"] = report(f"{name}, lensing L' <= {LPHI} removed", e)
+        out[f"{name}_lens"]["phi_lmax"] = LPHI
+    return out
+
+
 def analyse(mf, diff, dat):
     Y, K, Kerr, m, C, est = solve((ABER_CASE, "MOD"), mf, diff, dat)
     # Leave-one-response-sim-out copies of K, for the figures' errors on
@@ -874,6 +1051,30 @@ def analyse(mf, diff, dat):
                          G_jk=np.array([linear_maps(Kk, y_mf)["joint"]
                                         for Kk in K_jk]))
 
+    # The same three estimates from every reconstructed mode L <= LOUT of both
+    # estimators (report.md).
+    est_all, w_all, A_all, by_l, n_mode = solve_all_modes(
+        (ABER_CASE, "MOD"), mf, diff, dat)
+    n_m, p = len(mf), n_mode[-1]
+    infl = (n_m - 1) / max(n_m - p + 5, 1) - 1      # Wishart: (n-1)/(n-p+q-1)
+    print(f"\nestimates from all reconstructed modes L <= {LOUT} of both "
+          f"estimators ({p} modes), weighted by their covariance over the "
+          f"{n_m} mean-field sims")
+    if infl > 0.05:
+        print(f"   (with {n_m} mean-field sims for {p} modes the noise in the "
+              f"covariance adds about {infl:.0%} to the variance; more "
+              f"mean-field sims would lower it)")
+    for name, title in titles.items():
+        out[f"{name}_all"] = report(f"{title}, all modes L <= {LOUT}",
+                                    est_all[name])
+    print("\nsd of one sim, A, from the modes L <= 1 (the dipoles, as above) "
+          f"to L <= {LOUT}:")
+    for k, name in enumerate(titles):
+        print(f"   {name:10s} " + "  ".join(
+            f"L<={l + 1}: {by_l[l, k, 1, 0]:.4f}" for l in range(LOUT)))
+    out["system"].update(all_A=A_all, all_w=w_all, all_by_l=by_l,
+                         all_n_mode=n_mode, all_var_infl=infl)
+
     print("\nseparate aberration amplitude for each lensing combination")
     rows = []
     for case in CASES:
@@ -910,7 +1111,8 @@ def main():
     n_lens = args.n_lens_response if LENSED else 0
     counts = {"mf": args.n_meanfield, DATA: args.n_data,
               BASE: args.n_response, **{l: args.n_response for l in RESP_LABELS},
-              **{l: n_lens for l in PHI_LABELS}}
+              **{l: n_lens for l in PHI_LABELS},
+              **({"lensphi": args.n_data} if LENSED else {})}
     TODO.update({l: sum(not os.path.exists(cache_path(l, i))
                         for i in range(args.shard, n, args.nshards))
                  for l, n in counts.items()})
@@ -932,6 +1134,8 @@ def main():
             run(label, args.n_response)
         print("\n[C] data")
         run(DATA, args.n_data)
+        if LENSED:              # their low-L lensing modes, ~1 s each
+            run("lensphi", args.n_data)
         if n_lens:
             print("\n[D] lensing response")
             for label in PHI_LABELS:
@@ -963,6 +1167,8 @@ def main():
             results["system"].update(lens_response(
                 (phi[0::2] - phi[1::2]) / (2 * eps[:, None, None, None]),
                 mf, diff, dat))
+            results.update(lens_removed(mf, diff, dat,
+                                        results["system"]["lens_V"]))
         else:
             print("lensing response: too few sims cached yet")
 

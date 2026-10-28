@@ -16,6 +16,11 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        to each lensing mode phi_L'M'
     plots/lensing_dipole.png  (--cmb lensed) how lensing at each L' leaks
                        into the velocity estimates
+    plots/*/amplitude_direction_lens.png  (--cmb lensed) each estimate with
+                       the leakage of the data sims' own lensing modes
+                       L' <= --lens-lmax removed through the lensing
+                       response (phi known: the most an external lensing map
+                       could give), and the plain estimate for comparison
     plots/modulation/  modulation QE, solved without assuming the aberration;
                        unhardened likewise
     plots/joint/       one velocity for both effects; inverse_response is
@@ -147,6 +152,21 @@ def load(path, name=None):
                   if k.startswith(name + ".")})
         S["name"] = name
     return S
+
+
+def unlensed_sibling(summary, S):
+    """For a lensed run's summary.npz, that of the unlensed run with the same
+    options (cache tag without _lensed), if it exists."""
+    tag = str(S["cache_tag"])
+    if not tag.endswith("_lensed"):
+        return None
+    here = os.path.abspath(summary)
+    there = here.replace(os.sep + tag + os.sep,
+                         os.sep + tag[:-len("_lensed")] + os.sep)
+    if there == here or not os.path.exists(there):
+        return None
+    rel = os.path.relpath(there)
+    return there if rel.startswith("..") else rel
 
 
 def plot_coverage(S, path):
@@ -607,18 +627,31 @@ def plot_amplitude_direction(S, path):
     """Amplitude A, and the recovered directions in galactic coordinates:
     per-sim directions with 1 and 2 sd ellipses, their mean, the direction
     of the mean velocity with its error, and the input; the text box gives
-    the numbers."""
+    the numbers.  For a variant of an estimate (S["variant"] names it, e.g.
+    with the lensing leakage removed), S also holds the plain estimate's
+    amp_dipole and dir_dipole, drawn and quoted for comparison."""
     vin = np.linalg.norm(S["v_true"])
     amp = S["amp"] * vin                         # v . v_in-hat, km/s
-    col = COLOURS[S["name"]]
+    base = str(S["name"]).split("_")[0]
+    col = COLOURS[base]
+    variant = S.get("variant")
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.8),
                                    layout="constrained")
     sd = amp.std(ddof=1)
-    ax0.hist(amp, bins=30, color=col, alpha=0.4,
-             label=f"$v_\\parallel$ = {amp.mean():+.0f} $\\pm$ {sd:.0f} "
-                   f"km/s (sd)\n"
-                   f"N: {len(amp)} data, {int(S['n_mf'])} mf, "
-                   f"{int(S['n_resp'])} response")
+    old = S.get("amp_dipole")
+    bins = np.histogram_bin_edges(amp if old is None else
+                                  np.r_[amp, old * vin], 30)
+    ax0.hist(amp, bins=bins, color=col, alpha=0.4,
+             label=(f"{variant}: " if variant else "")
+             + f"$v_\\parallel$ = {amp.mean():+.0f} $\\pm$ {sd:.0f} "
+             f"km/s (sd)\n"
+             f"N: {len(amp)} data, {int(S['n_mf'])} mf, "
+             f"{int(S['n_resp'])} response")
+    if old is not None:
+        old = old * vin
+        ax0.hist(old, bins=bins, histtype="step", color=INK, lw=1.2,
+                 label=f"as before: {old.mean():+.0f} "
+                       f"$\\pm$ {old.std(ddof=1):.0f} km/s (sd)")
     for k in (-2, -1, 1, 2):
         ax0.axvline(amp.mean() + k * sd, color=col, ls=":", lw=1)
     ax0.axvline(amp.mean(), color=col, ls="--")
@@ -650,17 +683,21 @@ def plot_amplitude_direction(S, path):
     ax1.set_aspect(1 / np.cos(np.radians(b_in)), adjustable="datalim")
     ax1.set_xlabel(r"galactic longitude $\ell$ [deg]")
     ax1.set_ylabel(r"galactic latitude $b$ [deg]")
-    ax1.text(0.03, 0.03,
-             f"input   $\\ell$ = {l_in:.2f}°,  $b$ = {b_in:+.2f}°\n"
-             f"mean of sims   $\\ell$ = {lm:.2f}°,  $b$ = {bm:+.2f}°\n"
-             f"sd       $\\sigma_\\ell$ = {sl:.2f}°,  $\\sigma_b$ = {sb:.2f}°\n"
-             f"mean velocity   $\\ell$ = {lv:.2f} $\\pm$ {elv:.2f}°,  "
-             f"$b$ = {bv:+.2f} $\\pm$ {ebv:.2f}°  "
-             f"({angle:.2f}° from input)",
-             transform=ax1.transAxes, fontsize=9, va="bottom",
-             bbox=dict(fc="white", ec="0.8", alpha=0.9))
+    text = (f"input   $\\ell$ = {l_in:.2f}°,  $b$ = {b_in:+.2f}°\n"
+            f"mean of sims   $\\ell$ = {lm:.2f}°,  $b$ = {bm:+.2f}°\n"
+            f"sd       $\\sigma_\\ell$ = {sl:.2f}°,  $\\sigma_b$ = {sb:.2f}°\n"
+            f"mean velocity   $\\ell$ = {lv:.2f} $\\pm$ {elv:.2f}°,  "
+            f"$b$ = {bv:+.2f} $\\pm$ {ebv:.2f}°  "
+            f"({angle:.2f}° from input)")
+    if "dir_dipole" in S:
+        l0, b0 = lonlat(S["dir_dipole"] @ EQU2GAL.T)
+        l0 = l_in + (l0 - l_in + 180) % 360 - 180
+        text += (f"\nas before: sd  $\\sigma_\\ell$ = {l0.std(ddof=1):.2f}°,"
+                 f"  $\\sigma_b$ = {b0.std(ddof=1):.2f}°")
+    ax1.text(0.03, 0.03, text, transform=ax1.transAxes, fontsize=9,
+             va="bottom", bbox=dict(fc="white", ec="0.8", alpha=0.9))
     ax1.legend(fontsize=9, loc="upper right")
-    fig.suptitle(TITLES[S["name"]])
+    fig.suptitle(TITLES[base] + (f": {variant}" if variant else ""))
     fig.savefig(path)
     plt.close(fig)
 
@@ -987,6 +1024,80 @@ def write_report(summary, path):
     w(f"\nCorrelation of A between aberration and modulation, sim by sim: "
       f"r = {r:+.3f} ± {corr_err(r, n_d):.3f}.")
 
+    if "aberration_lens.amp" in np.load(summary).files:
+        Lm = int(load(summary, "aberration_lens")["phi_lmax"])
+        w(f"\n## Lensing L′ ≤ {Lm} removed (`*/amplitude_direction_lens.png`)\n")
+        w("Each data sim's own lensing modes φ_L′M′, 1 ≤ L′ ≤ "
+          f"{Lm}, are known in the simulation, and the lensing response says "
+          "how much velocity each puts into each estimate (lens_V below).  "
+          "These estimates subtract it, u − Σ V_L′M′ φ_L′M′.  On the sky φ "
+          "would have to come from outside these data: the reconstruction's "
+          "own L = 2–5 modes cannot separate it from the boost (next "
+          "section).  A full-sky lensing map with reconstruction noise N_L′ "
+          "per mode would remove only a fraction C_L′/(C_L′ + N_L′) of each "
+          "L′'s share, so this is the most such a map could give.  Every "
+          "subtracted term has zero mean, so the expected values are "
+          "unchanged; the scatter should fall by about the L′ ≤ "
+          f"{Lm} total in the lensing table, less what the Monte Carlo error "
+          "of V puts back.\n")
+        w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
+          "sd, as before | v sd per component, as before → removed [km/s] "
+          "|\n|---|---|---|---|---|---|---|")
+        for n in TITLES:
+            e = load(summary, n + "_lens")
+            a, er, sd = e["stat_mean"][0], e["stat_err"][0], e["stat_sd"][0]
+            w(f"| {n} | {expected(e)[1]:+.4f} | {a:+.4f} | {er:.4f} | "
+              f"{sd:.4f} | {E[n]['stat_sd'][0]:.4f} | "
+              f"{np.sqrt(np.mean(E[n]['stat_sd'][1:4] ** 2)):.0f} → "
+              f"{np.sqrt(np.mean(e['stat_sd'][1:4] ** 2)):.0f} |")
+
+    if "all_by_l" in sy:
+        by_l, nm = sy["all_by_l"], sy["all_n_mode"]
+        lout = len(nm)
+        w(f"\n## From all reconstructed modes L ≤ {lout}\n")
+        w("Can the data themselves remove what contaminates the dipoles?  "
+          "These estimates use every reconstructed mode 1 ≤ L ≤ "
+          f"{lout} of both estimators ({nm[-1]} numbers per sim) instead of "
+          "the six dipoles, weighted by their covariance C over the "
+          "mean-field sims: u = (Aᵀ C⁻¹ A)⁻¹ Aᵀ C⁻¹ (x − x_MF), with A the "
+          "response of every mode to (u_ab, u_mod) from the response sims "
+          "(its L = 1 rows are K).  In a lensed run the mean-field sims are "
+          "lensed, so C holds the lensing at every L′ as well as the noise.  "
+          "Of the linear estimates from these modes that recover any u, "
+          "this has the smallest variance; with the dipoles alone it is "
+          "K⁻¹.  The weights come from the mean-field and response sims "
+          "only, so the data sims' scatter measures it fairly; the joint "
+          "estimate weights the two separate ones per axis as before.  "
+          "Expect little gain: lensing at L′ = 2–5 does show up at L = L′, "
+          "but the boost (aberration is a lensing dipole) also leaks into "
+          "those modes, in nearly the same pattern on part of the sky, so "
+          "an estimate that keeps the boost cannot use them to remove the "
+          "lensing.\n")
+        infl = float(sy["all_var_infl"])
+        w(f"With {n_mf} mean-field sims for {nm[-1]} modes, the noise in C "
+          f"adds about {100 * infl:.1f}% to the variance (it falls as "
+          f"1/n_mf).\n")
+        w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
+          "sd, dipoles only | (mean − expected)/error |\n"
+          "|---|---|---|---|---|---|---|")
+        for n in TITLES:
+            e = load(summary, n + "_all")
+            a, er, sd = e["stat_mean"][0], e["stat_err"][0], e["stat_sd"][0]
+            a_e = expected(e)[1]
+            w(f"| {n} | {a_e:+.4f} | {a:+.4f} | {er:.4f} | {sd:.4f} | "
+              f"{E[n]['stat_sd'][0]:.4f} | {(a - a_e) / er:+.2f} |")
+        w(f"\nsd of one sim as the modes used grow from the dipoles (L ≤ 1, "
+          f"the estimate above) to L ≤ {lout}: A, and the velocity per "
+          "component (rms of x, y, z) in km/s.\n")
+        w("| estimate | " + " | ".join(f"L ≤ {l + 1} ({nm[l]} modes)"
+                                       for l in range(lout))
+          + " |\n|---|" + "---|" * lout)
+        for k, n in enumerate(TITLES):
+            w(f"| {n} | " + " | ".join(
+                f"{by_l[l, k, 1, 0]:.4f}, "
+                f"{np.sqrt(np.mean(by_l[l, k, 1, 1:4] ** 2)):.0f} km/s"
+                for l in range(lout)) + " |")
+
     label = ["A", "v_x [km/s]", "v_y [km/s]", "v_z [km/s]", "ℓ [deg]",
              "b [deg]"]
     fmt = [".4f", ".1f", ".1f", ".1f", ".2f", ".2f"]
@@ -1113,6 +1224,40 @@ def write_report(summary, path):
               + f" | {np.sqrt((sy['lens_sigma'][k] ** 2).sum()):.1f} | "
               f"{np.mean(E[e]['stat_sd'][1:4]):.0f} |")
         w("\n(km/s, per velocity component.)")
+        sib = unlensed_sibling(summary, S)
+        if sib:
+            U = {n: load(sib, n) for n in TITLES}
+            n_u = int(load(sib)["n_data"])
+            Lmx = int(np.max(sy["phi_modes"][:, 0]))
+            w(f"\nAgainst the unlensed run with the same options (`{sib}`, "
+              f"{n_u} data sims, the same seeds unlensed).  Velocity sd per "
+              "component (rms of x, y, z) in km/s.  *Lensing adds* is "
+              "√(sd_lensed² − sd_unlensed²), all the scatter lensing adds; "
+              "± is the error on the sd's of independent sims, an "
+              "overestimate since the two runs share seeds.  *From L′ ≤ "
+              f"{Lmx}* is the total above: the part that the lensing response "
+              "covers.  The rest comes from lensing at higher L′, or from "
+              "lensing changing the noise of the reconstruction (N1-like "
+              "terms), which no response to single modes describes.\n")
+            w(f"| estimate | sd unlensed | sd lensed | lensing adds | from "
+              f"L′ ≤ {Lmx} | sd lensed, L′ ≤ {Lmx} removed |"
+              "\n|---|---|---|---|---|---|")
+
+            def rms(e):
+                return float(np.sqrt(np.mean(e["stat_sd"][1:4] ** 2)))
+
+            have_lens = "aberration_lens.amp" in np.load(summary).files
+            for k, n in enumerate(TITLES):
+                su, sl = rms(U[n]), rms(E[n])
+                add2 = sl ** 2 - su ** 2
+                eadd2 = np.sqrt(2 * sl ** 4 / (n_d - 1) + 2 * su ** 4 / (n_u - 1))
+                add = (f"{np.sqrt(add2):.0f} ± "
+                       f"{eadd2 / (2 * np.sqrt(add2)):.0f}" if add2 > 0
+                       else f"none (variance {add2:+.0f} ± {eadd2:.0f})")
+                rem = (f"{rms(load(summary, n + '_lens')):.0f}" if have_lens
+                       else "—")
+                w(f"| {TITLES[n]} | {su:.0f} | {sl:.0f} | {add} | "
+                  f"{np.sqrt((sy['lens_sigma'][k] ** 2).sum()):.0f} | {rem} |")
 
     w("\n## Aberration amplitude for each lensing combination\n")
     w("The separate aberration estimate (solved with the modulation "
@@ -1157,6 +1302,20 @@ def make_all(summary, outdir=None):
         S = load(summary, name)
         for fn in fns:
             save(fn, S, os.path.join(folder, fn.__name__[5:] + ".png"))
+    if "aberration_lens.amp" in np.load(summary).files:
+        for name in TITLES:
+            S = load(summary, name + "_lens")
+            S0 = load(summary, name)
+            S.update(amp_dipole=S0["amp"], dir_dipole=S0["dir"],
+                     variant=f"lensing L′ ≤ {int(S['phi_lmax'])} removed, "
+                             "φ known")
+            save(plot_amplitude_direction, S,
+                 os.path.join(outdir, name, "amplitude_direction_lens.png"))
+    elif str(load(summary).get("cmb", "unlensed")) == "lensed":
+        print(f"skipped */amplitude_direction_lens.png: {summary} has no "
+              "lensing-removed estimates (it is from an older boost_act.py, "
+              "or the lensing-response sims are missing); rerun the current "
+              "one with the same options")
     for name in ("aberration", "modulation"):
         save(plot_unhardened, with_other(summary, name),
              os.path.join(outdir, name, "unhardened.png"))
