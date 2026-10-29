@@ -45,6 +45,12 @@ bias the response by ~l eps, ~15% per sim at l ~ 3000.  Without a mask it is
 diagonal; with one, lensing at L' >= 2 leaks into the dipole.  Weighted by
 C_L^phiphi it gives the scatter lensing adds to each velocity estimate
 (lensing_dipole.png, and lensing_response.png per estimator).
+--n-lens-bands N splits the scatter lensing adds by scale of phi, for the
+first N mean-field sims: each is remade unlensed and lensed by its phi
+restricted to one band of L' (--lens-bands), and so is a second CMB sky
+lensed by the same phi; the covariance of the two skies' changes is the
+coherent part (what a known phi removes), the rest depends on the CMB
+realization (N1-like) (lensing_bands.png, report.md).
 
 --boost aberration or --boost modulation applies only that effect to the
 data sims (the default, full, applies both), to check that each estimator
@@ -105,15 +111,18 @@ full-sky normalisations, and the mask is dealt with by simulation:
                separate estimate is unbiased for the same u, so any weights
                that sum to 1 are; these are the inverse-variance ones when
                the two are uncorrelated.  The 6x6 covariance is not used.
-    *_all      the same three from every reconstructed mode L <= LOUT of both
-               estimators, not only the dipoles: generalised least squares
-               with their covariance over the mean-field sims, which holds
-               the lensing at every L' (in a lensed run), the mean field's
-               scatter and the mask's coupling of the noise.  With the
-               dipoles alone it is the estimate above.  Needs n_mf well
-               above the number of modes (70).  Report only: on a partial
-               sky the boost and low-L lensing leave nearly the same
-               imprint on these modes, so it gains little (tested).
+    *_all      the same three from the reconstructed modes 1 <= L <= --lout
+               of the lensing estimator (and L <= --fit-mod-lmax of the
+               modulation one, default its dipole), not only the dipoles:
+               generalised least squares with their covariance over the
+               mean-field sims, which holds the lensing at every L' (in a
+               lensed run), the mean field's scatter and the mask's coupling
+               of the noise, and with the response's Monte Carlo noise
+               corrected (see gls_maps).  With the dipoles alone it is the
+               estimate above.  Report and amplitude_direction_all.png.  In
+               tests it gains 5-10% at most and does not remove the lensing
+               (see the comment above all_modes); it needs n_mf several
+               times the number of modes and many response sims.
     *_lens     (--cmb lensed) the dipole estimates less the leakage of each
                data sim's own lensing modes phi_L'M', L' <= --lens-lmax,
                predicted with the lensing response: u - sum V_L'M' phi_L'M'.
@@ -188,6 +197,27 @@ parser.add_argument("--lens-lmax", type=int, default=5,
                          "lensing modes in the lensing response.  Raising it "
                          "shows whether higher L' still add; modes already "
                          "cached are reused")
+parser.add_argument("--n-lens-bands", type=int, default=0,
+                    help="--cmb lensed only: mean-field sims to split the "
+                         "lensing scatter by L' with.  For each, the same phi "
+                         "lenses two CMB skies (the mean-field sim's and a "
+                         "second one), one band of --lens-bands at a time, and "
+                         "each sky is also reconstructed unlensed: "
+                         "3 + 2 n_bands reconstructions per sim "
+                         "(lensing_bands.png)")
+parser.add_argument("--lens-bands", default="2-5,6-20,21-",
+                    help="L' bands for --n-lens-bands, e.g. 2-5,6-20,21- "
+                         "(an open end runs to the highest multipole)")
+parser.add_argument("--lout", type=int, default=5,
+                    help="highest multipole L of each reconstruction kept in "
+                         "the cache (the estimates use L = 1; the all-mode "
+                         "fit uses more).  Values other than 5 get their own "
+                         "cache tag, <mask>_<noise>[_lensed]_lout<N>, since "
+                         "cached sims hold only the modes they were made with")
+parser.add_argument("--fit-mod-lmax", type=int, default=1,
+                    help="highest L of the modulation estimator's modes in "
+                         "the all-mode fit (default 1, its dipole); the "
+                         "lensing estimator's modes go up to --lout")
 parser.add_argument("--n-meanfield", type=int, default=800)
 parser.add_argument("--n-response", type=int, default=60)
 parser.add_argument("--n-data", type=int, default=400)
@@ -226,7 +256,7 @@ warnings.filterwarnings("ignore", message="In the future, the default will be")
 
 # ---------------------------------------------------------------- settings
 LMIN, LMAX, MLMAX = 600, 3000, 3500
-LOUT = 5                                  # highest reconstruction L kept
+LOUT = args.lout                          # highest reconstruction L kept
 RES = 3.0 * utils.arcmin                  # fejer1 grid: exact SHTs to l = 3599
 NOISE_LEVELS = {"f150": 24.0, "act": 14.0}    # uK-arcmin in T (P is sqrt2 x)
 NOISE_T = NOISE_LEVELS[args.noise]
@@ -242,7 +272,8 @@ CASES = {"TT": ["TT"], "TE": ["TE"], "EE": ["EE"], "T+P": EST}
 ABER_CASE = "T+P"                         # lensing combination used for u_aber
 LENSED = args.cmb == "lensed"
 CACHE_TAG = (f"{args.mask}_{args.noise}"  # new value whenever a setting changes
-             + ("_lensed" if LENSED else ""))
+             + ("_lensed" if LENSED else "")
+             + (f"_lout{LOUT}" if LOUT != 5 else ""))
 CACHE = os.path.join("cache_boost", CACHE_TAG)     # summary.npz and plots/
 SIMS = os.path.join(CACHE, "sims")                 # one .npy per sim
 # Effects applied to the data sims, the data sims' label, and where this
@@ -482,6 +513,33 @@ def lensed_by_mode(seed, mode, sign):
 # subtracts the predicted leakage of.  The same draw as cmb() makes.
 LENSPHI_L = max(10, LPHI)
 
+# Lensing by scale (--n-lens-bands): bands (lo, hi) of L', and the noisy CMB of
+# mean-field sim i unlensed, or lensed by its phi restricted to one band.
+LENS_BANDS = [(int(a), int(b) if b else MLMAX) for a, b in
+              (part.split("-") for part in args.lens_bands.split(","))]
+
+
+def band_limited(phi, lo, hi):
+    """phi (healpy alm, lmax MLMAX) with L outside lo..hi set to zero."""
+    L = np.arange(MLMAX + 1)
+    return hp.almxfl(phi, ((L >= lo) & (L <= hi)).astype(float))
+
+
+def mf_sim_lensed_by(i, band, sky=1):
+    """Mean-field sim i's CMB + noise (sky 1, the seeds of 'mf'), or a second
+    CMB + noise (sky 2), unlensed (band None) or lensed by the mean-field
+    sim's own phi restricted to band = (lo, hi).  Both skies share the phi."""
+    s = 1_000_000 + 2 * i
+    s_sky = s if sky == 1 else 5_000_000 + 2 * i
+    alm = unlensed_alm(s_sky)
+    if band is None:
+        tqu = curvedsky.alm2map(alm, enmap.zeros((3,) + shape, wcs),
+                                spin=[0, 2])
+    else:
+        phi = curvedsky.rand_alm(CLPP, lmax=MLMAX, seed=PHI_SEED + s)
+        tqu = lens(alm, band_limited(phi, *band))
+    return tqu + noise(s_sky + 1)
+
 
 def lens_modes(seed):
     """Real-basis coefficients of the phi that cmb(seed) lenses by, for
@@ -549,9 +607,15 @@ RESP_LABELS = [f"{effect} {axis}" for effect in EFFECTS for axis in "xyz"]
 # Lensing-response legs (--cmb lensed): each mode at +eps and -eps.
 # Files phi_2_-1_p_XXXX.npy, phi_2_-1_m_XXXX.npy, ...
 PHI_LABELS = [f"phi {L} {M:+d} {s}" for L, M in PHI_MODES for s in "pm"]
+# Sky 1: unlensed, and lensed by each band (the mean-field sim is lensed by
+# all of phi).  Sky 2: the same, all of phi included.
+BAND_LABELS = (["unlensed", "unlensed2"]
+               + [f"lband {lo} {hi}" for lo, hi in LENS_BANDS]
+               + [f"lband2 {lo} {hi}" for lo, hi in LENS_BANDS + [(0, MLMAX)]])
 STAGE = {"mf": "mf", DATA: "data", "lensphi": "data", BASE: "response",
          **{l: "response" for l in RESP_LABELS},
-         **{l: "lensing response" for l in PHI_LABELS}}
+         **{l: "lensing response" for l in PHI_LABELS},
+         **{l: "lensing by scale" for l in BAND_LABELS}}
 TODO = {}           # sims this run still has to make, per label (set in main)
 
 
@@ -566,9 +630,20 @@ def one_sim(label, i):
       phi L M p/m  noise-free CMB lensed by +eps or -eps of one lensing
                   mode (lensing response, --cmb lensed)
       lensphi     not a reconstruction: the low-L lensing modes of data
-                  sim i (--cmb lensed)"""
+                  sim i (--cmb lensed)
+      unlensed    mean-field sim i with its CMB unlensed (--n-lens-bands)
+      lband A B   mean-field sim i lensed by its phi at A <= L' <= B only
+      unlensed2, lband2 A B  the same for a second CMB and noise, lensed by
+                  the same phi"""
     if label == "lensphi":
         return lens_modes(3_000_000 + 2 * i)
+    if label in ("unlensed", "unlensed2"):
+        return reconstruct(mf_sim_lensed_by(i, None, 2 if label[-1] == "2"
+                                            else 1))
+    if label.startswith("lband"):
+        name, lo, hi = label.split()
+        return reconstruct(mf_sim_lensed_by(i, (int(lo), int(hi)),
+                                            2 if name == "lband2" else 1))
     if label == "mf":
         return reconstruct(cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i))
     if label == BASE:
@@ -829,11 +904,14 @@ def solve(names, mf, diff, dat):
 # estimate weights the two separate ones per axis as before.  The data sims
 # are not used to make the weights, so their scatter measures the result
 # honestly.
-# In tests at reduced resolution on a stand-in mask, even with the low-L
-# lensing raised 100x so that the modes L = 2-5 measure it at S/N ~2 per
-# mode, this gained ~9% in variance at best: aberration is itself a lensing
-# dipole, and on part of the sky it leaves nearly the same imprint on these
-# modes as lensing at L' = 2, 3, ... does, so they cannot tell the two apart.
+# Tests at reduced resolution on an ACT-like stand-in mask (f_sky 0.26), with
+# the lensing at L' = 6-12 raised 100x so that the modes there measure it at
+# S/N ~3-4 per mode (as ACT does at full resolution): even with the exact
+# covariance and response, modes to L = 12 lowered the aberration sd by only
+# 6% (lensed) and 9% (unlensed), so they do not remove the lensing.  On a
+# quarter of the sky a dipole deflection is mimicked by large-scale lensing,
+# and these data cannot tell the two apart.  With the response from few
+# response sims the fit is also unsteady (see gls_maps).
 
 
 def all_modes(a, lmax):
@@ -852,44 +930,77 @@ def all_modes(a, lmax):
 
 def system_all(names, mf, diff, dat, lmax):
     """All modes 1 <= L <= lmax of two estimators, stacked, for the
-    mean-field and data sims, and their response A (rows: modes; columns:
-    aberration xyz then modulation xyz), whose L = 1 rows are K."""
+    mean-field and data sims; their response A (rows: modes; columns:
+    aberration xyz then modulation xyz), whose L = 1 rows are K; and the
+    response of each response sim, (sim, mode, 6), whose mean is A."""
     Y = [[est_alm(x, n) for x in (mf, diff, dat)] for n in names]
     x_mf, x_dat = (np.concatenate([all_modes(y[k], lmax) for y in Y], -1)
                    for k in (0, 2))
     V = np.concatenate([all_modes(y[1], lmax) for y in Y], -1) / BETA
-    return x_mf, x_dat, V.mean(axis=2).reshape(6, -1).T
+    Vs = np.moveaxis(V.reshape(6, V.shape[2], -1), 0, -1)
+    return x_mf, x_dat, V.mean(axis=2).reshape(6, -1).T, Vs
 
 
-def gls_maps(A, x_mf):
-    """Generalised least squares from all the modes: P = (A^T C^-1 A)^-1
-    A^T C^-1, rows u_ab then u_mod, with C the modes' covariance over the
+def gls_maps(A, x_mf, Vs=None):
+    """Generalised least squares from all the modes, P = F^-1 A^T C^-1 with
+    F = A^T C^-1 A, rows u_ab then u_mod, C the modes' covariance over the
     mean-field sims; and the joint map, the per-axis weighted average of
     the two with w = s_mod^2 / (s_ab^2 + s_mod^2) on aberration (s their sd
-    over the mean-field sims), as for K^-1.  Returns the maps and w."""
+    over the mean-field sims), as for K^-1.
+    A is measured, the mean of the response sims Vs (sim, mode, 6), and its
+    Monte Carlo noise adds T = sum_s D_s^T C^-1 D_s / (n (n - 1)) to F on
+    average (D_s = Vs_s - A): in modes where the boost barely shows, the
+    noise looks like response, and P would shrink every estimate toward 0
+    (errors in variables).  With Vs, F - T is used instead.  Returns the
+    maps, w, the matrix R with P R = I (the response the estimates are
+    unbiased for, for their expected values) and T's share of F."""
     C = np.cov(x_mf, rowvar=False)
     CiA = np.linalg.solve(C, A)
-    P = np.linalg.solve(A.T @ CiA, CiA.T)
+    F = A.T @ CiA
+    T = np.zeros_like(F)
+    if Vs is not None and len(Vs) > 1:
+        D = Vs - A[None]
+        CiD = np.linalg.solve(C, np.moveaxis(D, 0, 1).reshape(len(A), -1))
+        T = np.einsum("sik,isl->kl", D, CiD.reshape(len(A), len(D), -1)
+                      ) / (len(D) * (len(D) - 1))
+    P = np.linalg.solve(F - T, CiA.T)
     s2 = np.einsum("ij,jk,ik->i", P, C, P)
     w = s2[3:] / (s2[:3] + s2[3:])
     G = np.hstack([np.diag(w), np.diag(1 - w)]) @ P
-    return {"aberration": P[:3], "modulation": P[3:], "joint": G}, w
+    R = A @ np.linalg.inv(np.eye(6) + np.linalg.solve(F - T, T))
+    share = float(np.trace(np.linalg.solve(F, T)) / 6)
+    return {"aberration": P[:3], "modulation": P[3:], "joint": G}, w, R, share
+
+
+FIT_MOD_LMAX = min(args.fit_mod_lmax, LOUT)
+
+
+def fit_modes(l):
+    """Indices, in system_all's stacking (lensing estimator's modes, then
+    the modulation estimator's), of the modes the all-mode fit uses when
+    limited to L <= l: the lensing estimator's to l, the modulation
+    estimator's to min(l, FIT_MOD_LMAX)."""
+    half = (LOUT + 1) ** 2 - 1
+    m = min(l, FIT_MOD_LMAX)
+    return np.r_[0:(l + 1) ** 2 - 1, half:half + (m + 1) ** 2 - 1]
 
 
 def solve_all_modes(names, mf, diff, dat):
     """The three estimates from all modes L <= LOUT (as solve() gives from
-    the dipoles), and the sd of their statistics when the modes are limited
-    to L <= 1, 2, ..., LOUT (L <= 1 is solve()'s estimate)."""
-    x_mf, x_dat, A = system_all(names, mf, diff, dat, LOUT)
-    n_mode = [2 * ((l + 1) ** 2 - 1) for l in range(1, LOUT + 1)]
-    by_l = []
-    for l, n in zip(range(1, LOUT + 1), n_mode):
-        keep = np.r_[0:n // 2, A.shape[0] // 2:A.shape[0] // 2 + n // 2]
-        maps, w = gls_maps(A[keep], x_mf[:, keep])
-        est = estimates(maps, A[keep], x_mf[:, keep], x_dat[:, keep])
+    the dipoles; the modulation estimator's to FIT_MOD_LMAX), and the sd of
+    their statistics when the modes are limited to L <= 1, 2, ..., LOUT
+    (L <= 1 is solve()'s estimate)."""
+    x_mf, x_dat, A, Vs = system_all(names, mf, diff, dat, LOUT)
+    n_mode, by_l, shares = [], [], []
+    for l in range(1, LOUT + 1):
+        keep = fit_modes(l)
+        n_mode.append(len(keep))
+        maps, w, R, share = gls_maps(A[keep], x_mf[:, keep], Vs[:, keep])
+        shares.append(share)
+        est = estimates(maps, R, x_mf[:, keep], x_dat[:, keep])
         by_l.append([[est[e][k] for k in ("mean", "sd", "err")]
                      for e in ("aberration", "modulation", "joint")])
-    return est, w, A, np.array(by_l), np.array(n_mode)
+    return est, w, A, np.array(by_l), np.array(n_mode), np.array(shares)
 
 
 def lens_response(dphi, mf, diff, dat):
@@ -966,6 +1077,96 @@ def lens_response(dphi, mf, diff, dat):
                    for k, r in R.items()})
 
 
+def lens_bands(mf, diff, dat, n):
+    """Where the lensing scatter comes from, by band of L' (--n-lens-bands).
+    For mean-field sim i, sky 1 is its own CMB + noise and sky 2 a second
+    one; both are reconstructed unlensed and lensed by the same phi (the
+    sim's), restricted to one band at a time.  The change in velocity that
+    lensing makes, d1 on sky 1 and d2 on sky 2, has two parts:
+      coherent     the estimator's mean response to phi, the same on both
+                   skies: the part a known phi removes (V phi of the
+                   lensing response, extended to every L').  Its variance
+                   is cov(d1, d2).
+      realization  what depends on the particular CMB and noise as well
+                   (N1-like, and lensing reshuffling small-scale CMB):
+                   var(d) - cov(d1, d2).  Part of it only reshuffles the
+                   estimator's noise rather than adding to it.
+    Also, for all L', the variance lensing adds, var(lensed) -
+    var(unlensed), over both skies.  Velocities use K^-1 and G as in the
+    main analysis; per-component (rms of x, y, z) values in km/s, signed
+    square roots (noise can make a small variance negative), errors by
+    jackknife over the sims."""
+    idx = [i for i in range(n) if all(os.path.exists(cache_path(l, i))
+                                      for l in BAND_LABELS + ["mf"])]
+    if len(idx) < 3:
+        print("lensing by scale: too few sims cached yet")
+        return {}
+    names = (ABER_CASE, "MOD")
+    _, y_mf, _, K, _ = system(names, mf, diff, dat)
+    maps = linear_maps(K, y_mf)
+    order = ("aberration", "modulation", "joint")
+
+    def vel(label):          # (estimate, sim, 3) velocity in km/s
+        rec = np.array([np.load(cache_path(label, i)) for i in idx])
+        y = np.concatenate([l1_vector(est_alm(rec, nm)) for nm in names], -1)
+        return np.stack([C_KMS * y @ maps[e].T for e in order])
+
+    u1, u2 = vel("unlensed"), vel("unlensed2")
+    l1 = [vel(f"lband {lo} {hi}") for lo, hi in LENS_BANDS] + [vel("mf")]
+    l2 = [vel(f"lband2 {lo} {hi}") for lo, hi in LENS_BANDS + [(0, MLMAX)]]
+
+    def parts(sel):
+        """(3, estimate, band + all): coherent var, realization var, and
+        (estimate,) added var, over the sims sel."""
+        def cov(a, b):
+            a, b = a[:, sel], b[:, sel]
+            return ((a - a.mean(1, keepdims=True))
+                    * (b - b.mean(1, keepdims=True))).sum(1).mean(-1) / (
+                        len(sel) - 1)
+        coh, tot = [], []
+        for a, b in zip(l1, l2):
+            d1, d2 = a - u1, b - u2
+            coh.append(cov(d1, d2))
+            tot.append(0.5 * (cov(d1, d1) + cov(d2, d2)))
+        coh, tot = np.array(coh).T, np.array(tot).T
+        added = 0.5 * (cov(l1[-1], l1[-1]) - cov(u1, u1)
+                       + cov(l2[-1], l2[-1]) - cov(u2, u2))
+        return coh, tot - coh, added
+
+    every = np.arange(len(idx))
+    full = parts(every)
+    jk = [parts(np.delete(every, k)) for k in every]
+    err = [np.sqrt((len(idx) - 1) * np.var([j[q] for j in jk], axis=0))
+           for q in range(3)]
+
+    def ssqrt(v):
+        return np.sign(v) * np.sqrt(np.abs(v))
+
+    def ssqrt_err(v, e):     # error of sqrt|v| from that of v
+        return e / (2 * np.sqrt(np.maximum(np.abs(v), e)))
+
+    cols = [f"L'={lo}-{hi}" for lo, hi in LENS_BANDS] + ["all L'"]
+    print(f"\nlensing by scale, {len(idx)} mean-field sims (two CMB skies "
+          "each, the same phi): per-component velocity change [km/s]")
+    for q, what in ((0, "coherent (a known phi removes it)"),
+                    (1, "realization-dependent")):
+        print(f"   {what}")
+        print("   " + " " * 11 + "".join(f"{c:>16s}" for c in cols))
+        for k, e in enumerate(order):
+            print(f"   {e:11s}" + "".join(
+                f"{ssqrt(full[q][k, b]):+8.1f} ± {ssqrt_err(full[q][k, b], err[q][k, b]):5.1f}"
+                for b in range(len(cols))))
+    print("   variance lensing adds, sqrt(var lensed - var unlensed): " + ", ".join(
+        f"{e} {ssqrt(full[2][k]):+.1f} ± {ssqrt_err(full[2][k], err[2][k]):.1f}"
+        for k, e in enumerate(order)))
+    return dict(band_lo=np.array([lo for lo, hi in LENS_BANDS]),
+                band_hi=np.array([hi for lo, hi in LENS_BANDS]),
+                band_coh_var=full[0], band_coh_var_err=err[0],
+                band_rand_var=full[1], band_rand_var_err=err[1],
+                band_added_var=full[2], band_added_var_err=err[2],
+                n_band_sims=len(idx))
+
+
 def lens_removed(mf, diff, dat, lens_V):
     """The three dipole estimates of each data sim less the leakage of its
     own lensing modes L' <= LPHI predicted by the lensing response,
@@ -994,6 +1195,37 @@ def lens_removed(mf, diff, dat, lens_V):
         out[f"{name}_lens"] = report(f"{name}, lensing L' <= {LPHI} removed", e)
         out[f"{name}_lens"]["phi_lmax"] = LPHI
     return out
+
+
+def all_modes_estimates(out, titles, mf, diff, dat):
+    """Add the estimates from all modes L <= LOUT to out (see analyse)."""
+    est_all, w_all, A_all, by_l, n_mode, shares = solve_all_modes(
+        (ABER_CASE, "MOD"), mf, diff, dat)
+    n_m, p = len(mf), n_mode[-1]
+    infl = (n_m - 1) / max(n_m - p + 5, 1) - 1      # Wishart: (n-1)/(n-p+q-1)
+    print(f"\nestimates from the reconstructed modes L <= {LOUT} of the "
+          f"lensing estimator and L <= {FIT_MOD_LMAX} of the modulation one "
+          f"({p} modes), weighted by their covariance over the {n_m} "
+          "mean-field sims")
+    if infl > 0.05:
+        print(f"   (with {n_m} mean-field sims for {p} modes the noise in the "
+              f"covariance adds about {infl:.0%} to the variance; more "
+              f"mean-field sims would lower it)")
+    print(f"   Monte Carlo noise of the response is {100 * shares[-1]:.0f}% of "
+          "its information and is subtracted"
+          + ("; that is large: more response sims (--n-response) would make "
+             "this estimate steadier" if shares[-1] > 0.15 else ""))
+    for name, title in titles.items():
+        out[f"{name}_all"] = report(f"{title}, all modes L <= {LOUT}",
+                                    est_all[name])
+    print("\nsd of one sim, A, from the modes L <= 1 (the dipoles, as above) "
+          f"to L <= {LOUT}:")
+    for k, name in enumerate(titles):
+        print(f"   {name:10s} " + "  ".join(
+            f"L<={l + 1}: {by_l[l, k, 1, 0]:.4f}" for l in range(LOUT)))
+    out["system"].update(all_A=A_all, all_w=w_all, all_by_l=by_l,
+                         all_n_mode=n_mode, all_var_infl=infl,
+                         all_mod_lmax=FIT_MOD_LMAX, all_resp_noise=shares)
 
 
 def analyse(mf, diff, dat):
@@ -1053,27 +1285,12 @@ def analyse(mf, diff, dat):
 
     # The same three estimates from every reconstructed mode L <= LOUT of both
     # estimators (report.md).
-    est_all, w_all, A_all, by_l, n_mode = solve_all_modes(
-        (ABER_CASE, "MOD"), mf, diff, dat)
-    n_m, p = len(mf), n_mode[-1]
-    infl = (n_m - 1) / max(n_m - p + 5, 1) - 1      # Wishart: (n-1)/(n-p+q-1)
-    print(f"\nestimates from all reconstructed modes L <= {LOUT} of both "
-          f"estimators ({p} modes), weighted by their covariance over the "
-          f"{n_m} mean-field sims")
-    if infl > 0.05:
-        print(f"   (with {n_m} mean-field sims for {p} modes the noise in the "
-              f"covariance adds about {infl:.0%} to the variance; more "
-              f"mean-field sims would lower it)")
-    for name, title in titles.items():
-        out[f"{name}_all"] = report(f"{title}, all modes L <= {LOUT}",
-                                    est_all[name])
-    print("\nsd of one sim, A, from the modes L <= 1 (the dipoles, as above) "
-          f"to L <= {LOUT}:")
-    for k, name in enumerate(titles):
-        print(f"   {name:10s} " + "  ".join(
-            f"L<={l + 1}: {by_l[l, k, 1, 0]:.4f}" for l in range(LOUT)))
-    out["system"].update(all_A=A_all, all_w=w_all, all_by_l=by_l,
-                         all_n_mode=n_mode, all_var_infl=infl)
+    if len(mf) >= 2 * len(fit_modes(LOUT)):
+        all_modes_estimates(out, titles, mf, diff, dat)
+    else:
+        print(f"\nestimates from all modes L <= {LOUT}: skipped, {len(mf)} "
+              f"mean-field sims are too few for the covariance of "
+              f"{len(fit_modes(LOUT))} modes")
 
     print("\nseparate aberration amplitude for each lensing combination")
     rows = []
@@ -1109,10 +1326,12 @@ def main():
     os.makedirs(SIMS, exist_ok=True)
     move_old_sims()
     n_lens = args.n_lens_response if LENSED else 0
+    n_band = min(args.n_lens_bands, args.n_meanfield) if LENSED else 0
     counts = {"mf": args.n_meanfield, DATA: args.n_data,
               BASE: args.n_response, **{l: args.n_response for l in RESP_LABELS},
               **{l: n_lens for l in PHI_LABELS},
-              **({"lensphi": args.n_data} if LENSED else {})}
+              **({"lensphi": args.n_data} if LENSED else {}),
+              **{l: n_band for l in BAND_LABELS}}
     TODO.update({l: sum(not os.path.exists(cache_path(l, i))
                         for i in range(args.shard, n, args.nshards))
                  for l, n in counts.items()})
@@ -1140,6 +1359,11 @@ def main():
             print("\n[D] lensing response")
             for label in PHI_LABELS:
                 run(label, n_lens)
+        if n_band:
+            print("\n[E] lensing by scale (the mean-field sims are the fully "
+                  "lensed members)")
+            for label in BAND_LABELS:
+                run(label, n_band)
     finally:
         if POOL:
             POOL.terminate()
@@ -1171,6 +1395,8 @@ def main():
                                         results["system"]["lens_V"]))
         else:
             print("lensing response: too few sims cached yet")
+    if n_band:
+        results["system"].update(lens_bands(mf, diff, dat, n_band))
 
     out = dict(v_true=C_KMS * U_TRUE, d_true=D_TRUE, beta=BETA, b_nu=B_NU,
                freq=FREQ, res_arcmin=RES / utils.arcmin,
