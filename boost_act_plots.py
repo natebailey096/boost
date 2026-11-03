@@ -299,15 +299,19 @@ def plot_noise(S, path):
                 label=f"$C_\\ell$ {name.upper()}")
         ax.plot(ell[nl > 0], (dl * nl)[nl > 0], color=RAW, ls="--",
                 label=f"$N_\\ell$ {name.upper()}")
-        ax.axvspan(S["lmin"], S["lmax"], color=COR, alpha=0.07,
+        hi = S["lmax"] if name == "tt" else S.get("lmax_pol", S["lmax"])
+        ax.axvspan(S["lmin"], hi, color=COR, alpha=0.07,
                    label="used by the estimators")
-        ax.axvline(knee, color=RAW, ls=":", label=r"$\ell_{\rm knee}$")
+        if knee > 0:                      # 0: white noise, no 1/f knee
+            ax.axvline(knee, color=RAW, ls=":", label=r"$\ell_{\rm knee}$")
         ax.set_yscale("log")
         ax.set_xlabel(r"$\ell$")
         ax.set_ylabel(r"$\ell(\ell+1)C_\ell/2\pi$ [$\mu$K$^2$]")
         ax.legend(fontsize=9)
     fig.suptitle(f"noise {str(S['noise_name'])}: {float(S['noise_t']):g} "
-                 r"$\mu$K-arcmin in T")
+                 r"$\mu$K-arcmin in T, "
+                 f"{float(S.get('noise_p', np.sqrt(2) * S['noise_t'])):g} in P; "
+                 f"beam {float(S['beam']):g}′")
     fig.savefig(path)
     plt.close(fig)
 
@@ -961,14 +965,23 @@ def write_report(summary, path):
     w(f"| multipoles | {int(S['lmin'])} ≤ ℓ ≤ {int(S['lmax'])} |")
     mask = str(S["mask_kind"])
     w(f"| maps | {float(S['res_arcmin']):g}′ CAR |")
-    w("| mask | " + (f"ACT DR6 lensing (`{S['mask_file']}`), f_sky = "
-                     f"{float(S['fsky']):.4f}, w2 = {float(S['w2']):.4f} |"
-                     if mask == "dr6" else "none (full sky) |"))
+    mask_name = {"dr6": "ACT DR6 lensing", "planck": "Planck PR3 common (T)"}
+    apod = float(S.get("mask_apod", 0.0))
+    w("| mask | " + (f"{mask_name.get(mask, mask)} (`{S['mask_file']}`"
+                     + (f", apodized {apod:g}°" if apod > 0 else "")
+                     + f"), f_sky = {float(S['fsky']):.4f}, "
+                     f"w2 = {float(S['w2']):.4f} |"
+                     if mask != "none" else "none (full sky) |"))
+    noise_p = float(S.get("noise_p", np.sqrt(2) * float(S["noise_t"])))
+    lmax_pol = int(S.get("lmax_pol", S["lmax"]))
+    knees = ("white (no 1/f)" if S["knee"][0] <= 0 else
+             f"1/f knees {S['knee'][0]:g} (T), {S['knee'][1]:g} (P); slopes "
+             f"{S['alpha'][0]:g} (T), {S['alpha'][1]:g} (P)")
     w(f"| noise (`--noise {S['noise_name']}`) | {float(S['noise_t']):g} "
-      f"μK-arcmin in T, "
-      f"×√2 in P; beam {float(S['beam']):g}′ FWHM; 1/f knees "
-      f"{S['knee'][0]:g} (T), {S['knee'][1]:g} (P); slopes {S['alpha'][0]:g} "
-      f"(T), {S['alpha'][1]:g} (P); zero below ℓ = {int(S['lmin'])} |")
+      f"μK-arcmin in T, {noise_p:g} in P; beam {float(S['beam']):g}′ FWHM; "
+      f"{knees}; zero below ℓ = {int(S['lmin'])} |")
+    if lmax_pol < int(S["lmax"]):
+        w(f"| E, B multipoles | {int(S['lmin'])} ≤ ℓ ≤ {lmax_pol} |")
     w(f"| input boost | β = {float(S['beta']):.4e} = "
       f"{np.linalg.norm(v_in):.1f} km/s toward galactic ℓ = {l_in:.2f}°, "
       f"b = {b_in:+.2f}° (ra {ra_in:.2f}°, dec {dec_in:+.2f}°) |")

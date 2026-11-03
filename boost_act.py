@@ -11,9 +11,18 @@ different response and options for the mask and the noise level.
                            nside 4096, equatorial, ~0.8 GB; --mask-file says
                            where it is, default the working directory):
     https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/baseline/mask_act_dr6_lensing_v1_healpix_nside_4096_baseline.fits
+    --mask   planck        the Planck PR3 common temperature mask (healpix
+                           nside 2048, galactic, binary, ~190 MB), rotated to
+                           equatorial and apodized by --mask-apod (0.5 deg):
+    https://irsa.ipac.caltech.edu/data/Planck/release_3/ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits
     --noise  f150 | act    white noise in T of 24 (f150) or 14 (act) uK-arcmin,
                            sqrt2 x that in P.  Beam, 1/f knees and slopes are
-                           the same for both.
+                           the same for both; 600 <= l <= 3000.
+    --noise  planck        SMICA-like: 45 uK-arcmin in T, sqrt2 x in P, 5'
+                           beam, white; 200 <= l <= 1800, E and B to 1150
+                           (Ferreira & Quartin 2021); 143 GHz.  --noise-t,
+                           --noise-p, --beam, --lmin, --lmax, --lmax-pol and
+                           --freq override a preset, and add to the cache tag.
 
 Needs the falafel branch darby_birefringence_patchytau and the tempura branch
 darbys_tau_edits2 (the ACT DR6 screening versions); it stops at start-up if
@@ -143,8 +152,9 @@ each response sim cancels most of its CMB.
 Each reconstruction is cached in cache_boost/<mask>_<noise>/sims/ (one .npy
 per sim, named by stage and index; the seeds follow the index), so an
 interrupted run resumes and a larger N only adds sims.  If you edit a
-constant below, or point --mask-file at a different mask, change CACHE_TAG
-too: each tag keeps its own sims.  The DR6 mask on the CAR grid is cached in
+constant below, change CACHE_TAG too: each tag keeps its own sims.  A
+--mask-file other than the DR6 lensing mask adds the file's name to the tag
+(dr6_<noise>_<file>), so a wider mask gets its own sims.  The DR6 mask on the CAR grid is cached in
 cache_boost/masks/.  Every run, shard or not, then reports on all sims cached
 so far (by any shard) and writes summary.npz and the figures (plots/, drawn
 by boost_act_plots.py) into cache_boost/<mask>_<noise>/, beside sims/, so a
@@ -162,20 +172,62 @@ import numpy as np
 
 MASK_URL = ("https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/"
             "baseline/mask_act_dr6_lensing_v1_healpix_nside_4096_baseline.fits")
+PLANCK_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_3/"
+                   "ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits")
+# Each mask: where to get it, its coordinates, and the default apodization (deg)
+MASKS = {"dr6": (MASK_URL, "equ", 0.0), "planck": (PLANCK_MASK_URL, "gal", 0.5)}
+# Noise and multipole presets.  knee 0 means no 1/f.  P noise None is sqrt2 x T.
+NOISE_PRESETS = {
+    "f150": dict(t=24.0, p=None, beam=1.42, knee=(3000.0, 475.0),
+                 alpha=(-3.0, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
+                 freq=150.0),
+    "act": dict(t=14.0, p=None, beam=1.42, knee=(3000.0, 475.0),
+                alpha=(-3.0, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
+                freq=150.0),
+    "planck": dict(t=45.0, p=None, beam=5.0, knee=(0.0, 0.0),
+                   alpha=(-3.0, -4.5), lmin=200, lmax=1800, lmax_pol=1150,
+                   freq=143.0),
+}
 
 # The options are read before the heavy imports below, so that --help and a
 # mistyped option answer at once.
 parser = argparse.ArgumentParser(
     description="Doppler boost of the CMB: aberration and modulation, "
                 "measured with two quadratic estimators")
-parser.add_argument("--mask", default="dr6", choices=["none", "dr6"],
-                    help="none: full sky.  dr6: the ACT DR6 lensing mask")
-parser.add_argument("--mask-file", default=os.path.basename(MASK_URL),
-                    help="the DR6 healpix mask (--mask dr6 only)")
-parser.add_argument("--noise", default="f150", choices=["f150", "act"],
-                    help="white noise level in T: f150 is 24 uK-arcmin, act "
-                         "is 14 uK-arcmin (P is sqrt2 x); the beam and the "
-                         "1/f knees are the same")
+parser.add_argument("--mask", default="dr6", choices=["none", "dr6", "planck"],
+                    help="none: full sky.  dr6: the ACT DR6 lensing mask "
+                         "(equatorial, already apodized).  planck: the Planck "
+                         "PR3 common temperature mask (galactic, binary; "
+                         "rotated to equatorial and apodized by --mask-apod)")
+parser.add_argument("--mask-file", default=None,
+                    help="the healpix mask file (default: the --mask one's "
+                         "file name, in the working directory)")
+parser.add_argument("--mask-apod", type=float, default=None,
+                    help="cosine apodization width in degrees applied to the "
+                         "thresholded mask (default 0 for dr6, which is "
+                         "apodized already, 0.5 for planck)")
+parser.add_argument("--noise", default="f150", choices=["f150", "act", "planck"],
+                    help="noise and multipole preset.  f150: 24 uK-arcmin in "
+                         "T, act: 14 uK-arcmin; both 1.4' beam, ACT 1/f knees, "
+                         "600 <= l <= 3000, 150 GHz.  planck: SMICA-like, 45 "
+                         "uK-arcmin in T, 5' beam, white, 200 <= l <= 1800 "
+                         "with E and B to 1150 (as Ferreira & Quartin 2021), "
+                         "143 GHz.  P is sqrt2 x T unless --noise-p")
+parser.add_argument("--noise-t", type=float, default=None,
+                    help="override the preset's T white noise, uK-arcmin")
+parser.add_argument("--noise-p", type=float, default=None,
+                    help="override the preset's P white noise, uK-arcmin")
+parser.add_argument("--beam", type=float, default=None,
+                    help="override the preset's beam FWHM, arcmin")
+parser.add_argument("--lmin", type=int, default=None,
+                    help="override the preset's lowest CMB multipole used")
+parser.add_argument("--lmax", type=int, default=None,
+                    help="override the preset's highest CMB multipole used")
+parser.add_argument("--lmax-pol", type=int, default=None,
+                    help="override the preset's highest E/B multipole used")
+parser.add_argument("--freq", type=float, default=None,
+                    help="override the preset's frequency in GHz (sets the "
+                         "modulation factor b)")
 parser.add_argument("--boost", default="full",
                     choices=["full", "aberration", "modulation"],
                     help="which effects the data sims get: both (full), or "
@@ -255,23 +307,57 @@ warnings.filterwarnings("ignore", message="The tweak argument is deprecated")
 warnings.filterwarnings("ignore", message="In the future, the default will be")
 
 # ---------------------------------------------------------------- settings
-LMIN, LMAX, MLMAX = 600, 3000, 3500
+_P = NOISE_PRESETS[args.noise]
+# Settings given on the command line that differ from the preset; each goes
+# into the cache tag, so sims made with different settings never mix.
+_OVERRIDES = []
+for _key, _arg, _short in [("t", "noise_t", "nt"), ("p", "noise_p", "np"),
+                           ("beam", "beam", "beam"), ("lmin", "lmin", "lmin"),
+                           ("lmax", "lmax", "lmax"),
+                           ("lmax_pol", "lmax_pol", "lmaxpol"),
+                           ("freq", "freq", "freq")]:
+    _v = getattr(args, _arg)
+    if _v is not None and _v != _P[_key]:
+        _P = {**_P, _key: _v}
+        _OVERRIDES.append(f"{_short}{_v:g}")
+LMIN, LMAX, MLMAX = int(_P["lmin"]), int(_P["lmax"]), 3500
+LMAX_POL = min(int(_P["lmax_pol"]), LMAX)  # E and B are used to here
+if not 2 <= LMIN < LMAX <= MLMAX - 200:
+    raise SystemExit(f"need 2 <= lmin < lmax <= {MLMAX - 200}")
 LOUT = args.lout                          # highest reconstruction L kept
 RES = 3.0 * utils.arcmin                  # fejer1 grid: exact SHTs to l = 3599
-NOISE_LEVELS = {"f150": 24.0, "act": 14.0}    # uK-arcmin in T (P is sqrt2 x)
-NOISE_T = NOISE_LEVELS[args.noise]
-BEAM = 1.42                               # FWHM, arcmin
+NOISE_T = float(_P["t"])                  # uK-arcmin in T
+NOISE_P = float(_P["p"]) if _P["p"] is not None else NOISE_T * np.sqrt(2.0)
+BEAM = float(_P["beam"])                  # FWHM, arcmin
 TCMB, C_KMS = 2.7255e6, 299792.458        # uK, km/s
-KNEE_T, KNEE_P = 3000.0, 475.0            # 1/f knees
-ALPHA_T, ALPHA_P = -3.0, -4.5             # 1/f slopes
-FREQ = 150e9                              # Hz; sets the modulation factor b
+KNEE_T, KNEE_P = _P["knee"]               # 1/f knees (0: none)
+ALPHA_T, ALPHA_P = _P["alpha"]            # 1/f slopes
+FREQ = float(_P["freq"]) * 1e9            # Hz; sets the modulation factor b
 BETA, BDIR = aberration.beta, aberration.dir_equ     # BDIR is (ra, dec), rad
 AXES = [(0.0, 0.0), (np.pi / 2, 0.0), (0.0, np.pi / 2)]   # x, y, z as (ra, dec)
 EST = ["TT", "TE", "EE"]
 CASES = {"TT": ["TT"], "TE": ["TE"], "EE": ["EE"], "T+P": EST}
 ABER_CASE = "T+P"                         # lensing combination used for u_aber
 LENSED = args.cmb == "lensed"
+# A mask file other than the --mask one's own (by file name, wherever it is)
+# gets its own tag, named after the file, so its sims never mix with those;
+# so does an apodization other than the default.
+if args.mask != "none":
+    _url, MASK_COORD, _apod0 = MASKS[args.mask]
+    if args.mask_file is None:
+        args.mask_file = os.path.basename(_url)
+    MASK_APOD = _apod0 if args.mask_apod is None else args.mask_apod
+    _mask_stem = os.path.splitext(os.path.basename(args.mask_file))[0]
+    _other_mask = os.path.basename(args.mask_file) != os.path.basename(_url)
+    if MASK_APOD != _apod0:
+        _OVERRIDES.append(f"apod{MASK_APOD:g}")
+else:
+    _url, MASK_COORD, MASK_APOD, _other_mask = None, "equ", 0.0, False
+    args.mask_file = args.mask_file or ""
 CACHE_TAG = (f"{args.mask}_{args.noise}"  # new value whenever a setting changes
+             + (f"_{''.join(c if c.isalnum() or c in '-.' else '_' for c in _mask_stem)}"
+                if _other_mask else "")
+             + "".join(f"_{o}" for o in _OVERRIDES)
              + ("_lensed" if LENSED else "")
              + (f"_lout{LOUT}" if LOUT != 5 else ""))
 CACHE = os.path.join("cache_boost", CACHE_TAG)     # summary.npz and plots/
@@ -348,18 +434,23 @@ bl2 = hp.gauss_beam(BEAM * utils.arcmin, lmax=MLMAX) ** 2
 
 
 def act_noise(white, knee, alpha):
-    nl = ((white * utils.arcmin / TCMB) ** 2
-          * (1.0 + (np.maximum(ell, 1.0) / knee) ** alpha) / bl2)
+    red = (np.maximum(ell, 1.0) / knee) ** alpha if knee > 0 else 0.0
+    nl = (white * utils.arcmin / TCMB) ** 2 * (1.0 + red) / bl2
     nl[LMAX + 1:] = nl[LMAX]
     nl[:LMIN] = 0.0
     return nl
 
 
 nltt = act_noise(NOISE_T, KNEE_T, ALPHA_T)
-nlee = act_noise(NOISE_T * np.sqrt(2.0), KNEE_P, ALPHA_P)
+nlee = act_noise(NOISE_P, KNEE_P, ALPHA_P)
 
 ucls = {"TT": cltt, "EE": clee, "BB": clbb, "TE": clte}
 tcls = {"TT": cltt + nltt, "EE": clee + nlee, "BB": clbb + nlee, "TE": clte}
+# E and B above LMAX_POL: an effectively infinite noise in the filters and the
+# normalisations (not in the sims), so they drop out of every estimator.
+for _k in ("EE", "BB") if LMAX_POL < LMAX else ():
+    tcls[_k] = tcls[_k].copy()
+    tcls[_k][LMAX_POL + 1:] = 1.0
 
 
 def inverse_variance(total):
@@ -401,16 +492,21 @@ px_mod = qe.pixelization(shape=shape, wcs=wcs, dtype=np.float64)
 pixarea = enmap.pixsizemap(shape, wcs, broadcastable=True)
 
 
-def load_dr6_mask(path):
-    """The DR6 mask on this CAR grid.  Read at each CAR pixel centre by
+def load_mask(path, url, coord="equ", apod=0.0):
+    """The healpix mask on this CAR grid.  Read at each CAR pixel centre by
     bilinear interpolation, which stays inside [0, 1] where a harmonic
-    reprojection rings.  The result is cached in cache_boost/masks/, written
-    under a temporary name and renamed, so parallel shards read it once."""
+    reprojection rings; a galactic mask (Planck's) is rotated to equatorial
+    on the way.  With apod > 0 the mask is thresholded at 0.5 and given a
+    cosine edge apod degrees wide, inward from every boundary (point-source
+    holes too).  The result is cached in cache_boost/masks/, written under a
+    temporary name and renamed, so parallel shards read it once."""
     if not os.path.exists(path):
-        raise SystemExit(f"DR6 mask not found at {path}.  Download it from\n"
-                         f"{MASK_URL}\nor give its location with --mask-file.")
+        raise SystemExit(f"mask not found at {path}.  Download it from\n"
+                         f"{url}\nor give its location with --mask-file.")
     name = (f"{os.path.splitext(os.path.basename(path))[0]}_"
-            f"{os.path.getsize(path)}_car{RES / utils.arcmin:g}.fits")
+            f"{os.path.getsize(path)}_car{RES / utils.arcmin:g}"
+            + (f"_{coord}" if coord != "equ" else "")
+            + (f"_apod{apod:g}" if apod > 0 else "") + ".fits")
     car = os.path.join("cache_boost", "masks", name)
     if os.path.exists(car):
         if not IN_WORKER:
@@ -419,9 +515,14 @@ def load_dr6_mask(path):
     print(f"mask: {path} -> CAR ...", flush=True)
     hmask = np.clip(np.nan_to_num(hp.read_map(path, dtype=np.float32)), 0, 1)
     m = reproject.healpix2map(hmask, shape, wcs, spin=[0], method="spline",
-                              order=1)
+                              order=1,
+                              rot=None if coord == "equ" else f"{coord},equ")
     del hmask
     m = enmap.enmap(np.asarray(m, np.float64).reshape(shape), wcs)
+    if apod > 0:
+        m = enmap.apod_mask(enmap.enmap((m > 0.5).astype(np.float64), wcs),
+                            width=apod * utils.degree)
+        m = enmap.enmap(np.clip(np.asarray(m, np.float64), 0, 1), wcs)
     os.makedirs(os.path.dirname(car), exist_ok=True)
     tmp = f"{car}.{os.getpid()}.fits"
     enmap.write_map(tmp, m)
@@ -429,8 +530,8 @@ def load_dr6_mask(path):
     return m
 
 
-if args.mask == "dr6":
-    MASK = load_dr6_mask(args.mask_file)
+if args.mask != "none":
+    MASK = load_mask(args.mask_file, _url, MASK_COORD, MASK_APOD)
     W1, W2 = [float((MASK ** n * pixarea).sum() / (4 * np.pi)) for n in (1, 2)]
 else:
     MASK = None                           # full sky: nothing to multiply
@@ -1306,13 +1407,14 @@ def analyse(mf, diff, dat):
 def main():
     print(f"mask {args.mask}"
           + (f" ({args.mask_file})" if MASK is not None else " (full sky)")
-          + f", noise {args.noise} ({NOISE_T:g} uK-arcmin in T), "
+          + f", noise {args.noise} ({NOISE_T:g} uK-arcmin in T, "
+          f"{NOISE_P:g} in P, beam {BEAM:g}'), "
           f"cache tag {CACHE_TAG}")
     print(f"boost {args.boost}: data sims "
           + {"full": "aberrated and modulated", "aberration": "aberrated only",
              "modulation": "modulated only"}[args.boost]
           + f"; summary and plots in {OUT}/")
-    print(f"lmin {LMIN}, lmax {LMAX}, mlmax {MLMAX}, {RES / utils.arcmin:g}' "
+    print(f"lmin {LMIN}, lmax {LMAX} (E, B to {LMAX_POL}), mlmax {MLMAX}, {RES / utils.arcmin:g}' "
           f"CAR {shape[0]}x{shape[1]}, fsky {W1:.4f}, w2 {W2:.4f}")
     print(f"beta {BETA:.4e} towards ra {np.degrees(BDIR[0]):.2f}, "
           f"dec {np.degrees(BDIR[1]):.2f}; modulation b = {B_NU:.4f} at "
@@ -1400,7 +1502,8 @@ def main():
 
     out = dict(v_true=C_KMS * U_TRUE, d_true=D_TRUE, beta=BETA, b_nu=B_NU,
                freq=FREQ, res_arcmin=RES / utils.arcmin,
-               noise_name=args.noise, noise_t=NOISE_T, beam=BEAM,
+               noise_name=args.noise, noise_t=NOISE_T, noise_p=NOISE_P,
+               beam=BEAM, lmax_pol=LMAX_POL, mask_apod=MASK_APOD,
                mask_kind=args.mask,
                mask_file=args.mask_file if MASK is not None else "",
                cache_tag=CACHE_TAG, stat_names=STATS,
