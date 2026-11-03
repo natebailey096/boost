@@ -158,11 +158,11 @@ def unlensed_sibling(summary, S):
     """For a lensed run's summary.npz, that of the unlensed run with the same
     options (cache tag without _lensed), if it exists."""
     tag = str(S["cache_tag"])
-    if not tag.endswith("_lensed"):
+    if "_lensed" not in tag:              # ..._lensed or ..._lensed_lout10
         return None
     here = os.path.abspath(summary)
     there = here.replace(os.sep + tag + os.sep,
-                         os.sep + tag[:-len("_lensed")] + os.sep)
+                         os.sep + tag.replace("_lensed", "", 1) + os.sep)
     if there == here or not os.path.exists(there):
         return None
     rel = os.path.relpath(there)

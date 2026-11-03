@@ -18,9 +18,10 @@ different response and options for the mask and the noise level.
     --noise  f150 | act    white noise in T of 24 (f150) or 14 (act) uK-arcmin,
                            sqrt2 x that in P.  Beam, 1/f knees and slopes are
                            the same for both; 600 <= l <= 3000.
-    --noise  planck        SMICA-like: 45 uK-arcmin in T, sqrt2 x in P, 5'
-                           beam, white; 200 <= l <= 1800, E and B to 1150
-                           (Ferreira & Quartin 2021); 143 GHz.  --noise-t,
+    --noise  planck        33 uK-arcmin in T, 70 in P (the Planck 2018 143 GHz
+                           noise, Planck 2018 I Table 4), 5' beam, white;
+                           200 <= l <= 1800, E and B to 1150 (Ferreira &
+                           Quartin 2021); 143 GHz.  --noise-t,
                            --noise-p, --beam, --lmin, --lmax, --lmax-pol and
                            --freq override a preset, and add to the cache tag.
 
@@ -175,7 +176,7 @@ MASK_URL = ("https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/"
 PLANCK_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_3/"
                    "ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits")
 # Each mask: where to get it, its coordinates, and the default apodization (deg)
-MASKS = {"dr6": (MASK_URL, "equ", 0.0), "planck": (PLANCK_MASK_URL, "gal", 0.5)}
+MASKS = {"dr6": (MASK_URL, "equ", 0.0), "planck": (PLANCK_MASK_URL, "gal", 0.0)}
 # Noise and multipole presets.  knee 0 means no 1/f.  P noise None is sqrt2 x T.
 NOISE_PRESETS = {
     "f150": dict(t=24.0, p=None, beam=1.42, knee=(3000.0, 475.0),
@@ -184,10 +185,13 @@ NOISE_PRESETS = {
     "act": dict(t=14.0, p=None, beam=1.42, knee=(3000.0, 475.0),
                 alpha=(-3.0, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
                 freq=150.0),
-    "planck": dict(t=45.0, p=None, beam=5.0, knee=(0.0, 0.0),
+    # planck: the 143 GHz white noise of Planck 2018 results I, Table 4
+    # (0.55 uK deg in T, 1.17 in P), behind the 5' beam of the CMB maps
+    "planck": dict(t=33.0, p=70.0, beam=5.0, knee=(0.0, 0.0),
                    alpha=(-3.0, -4.5), lmin=200, lmax=1800, lmax_pol=1150,
                    freq=143.0),
 }
+
 
 # The options are read before the heavy imports below, so that --help and a
 # mistyped option answer at once.
@@ -209,10 +213,12 @@ parser.add_argument("--mask-apod", type=float, default=None,
 parser.add_argument("--noise", default="f150", choices=["f150", "act", "planck"],
                     help="noise and multipole preset.  f150: 24 uK-arcmin in "
                          "T, act: 14 uK-arcmin; both 1.4' beam, ACT 1/f knees, "
-                         "600 <= l <= 3000, 150 GHz.  planck: SMICA-like, 45 "
-                         "uK-arcmin in T, 5' beam, white, 200 <= l <= 1800 "
-                         "with E and B to 1150 (as Ferreira & Quartin 2021), "
-                         "143 GHz.  P is sqrt2 x T unless --noise-p")
+                         "600 <= l <= 3000, 150 GHz.  planck: "
+                         "33 uK-arcmin in T and 70 in P "
+                         "(Planck 2018 143 GHz), 5' beam, white, "
+                         "200 <= l <= 1800 with E and B to 1150 (as Ferreira "
+                         "& Quartin 2021), 143 GHz.  P is sqrt2 x T unless "
+                         "--noise-p")
 parser.add_argument("--noise-t", type=float, default=None,
                     help="override the preset's T white noise, uK-arcmin")
 parser.add_argument("--noise-p", type=float, default=None,
@@ -354,7 +360,9 @@ if args.mask != "none":
 else:
     _url, MASK_COORD, MASK_APOD, _other_mask = None, "equ", 0.0, False
     args.mask_file = args.mask_file or ""
-CACHE_TAG = (f"{args.mask}_{args.noise}"  # new value whenever a setting changes
+# planck18: 33 / 70 uK-arcmin (sims made with the first --noise planck,
+# 45 uK-arcmin in T, were tagged planck_planck)
+CACHE_TAG = (f"{args.mask}_{'planck18' if args.noise == 'planck' else args.noise}"
              + (f"_{''.join(c if c.isalnum() or c in '-.' else '_' for c in _mask_stem)}"
                 if _other_mask else "")
              + "".join(f"_{o}" for o in _OVERRIDES)
