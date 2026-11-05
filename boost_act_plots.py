@@ -779,7 +779,10 @@ def plot_lensing_response(S, path):
     thresh = max(float(np.median(err)), 1e-6 * np.abs(V).max())
     vmax = max(np.abs(V).max(), 10 * thresh)
     nr, nc = V.shape
-    fig, ax = plt.subplots(figsize=(1.6 + 0.26 * nc, 1.4 + 0.26 * nr),
+    # 0.26" per cell, shrunk so a big matrix (--lens-lmax 20: 440 columns)
+    # stays within about 24" x 30".
+    cw, ch = min(0.26, 22 / nc), min(0.26, 28 / nr)
+    fig, ax = plt.subplots(figsize=(1.6 + cw * nc, 1.4 + ch * nr),
                            layout="constrained")
     ax.set_facecolor("0.93")
     im = ax.imshow(V, cmap="RdBu_r", aspect="auto",
@@ -794,11 +797,22 @@ def plot_lensing_response(S, path):
         r0, c0 = np.flatnonzero(lr == L)[0], np.flatnonzero(lc == L)[0]
         ax.add_patch(Rectangle((c0 - 0.5, r0 - 0.5), 2 * L + 1, 2 * L + 1,
                                fill=False, ec=INK, lw=1.5))
-    ax.set_xticks(range(nc), [f"{l},{m:+d}" for l, m in cols], rotation=90,
+    def ticks(labels, ls, per_mode):
+        """Every (L, M) when there are few, else one label per L at the
+        middle of its block."""
+        if per_mode:
+            return range(len(labels)), [f"{l},{m:+d}" for l, m in labels]
+        ls = np.asarray(ls)
+        Ls = np.unique(ls)
+        return [np.flatnonzero(ls == L).mean() for L in Ls], [str(L) for L in Ls]
+    few_c, few_r = nc <= 60, nr <= 60
+    ax.set_xticks(*ticks(cols, lc, few_c), rotation=90 if few_c else 0,
                   fontsize=7)
-    ax.set_yticks(range(nr), [f"{l},{m:+d}" for l, m in rows], fontsize=7)
-    ax.set_xlabel("input lensing mode $(L', M')$")
-    ax.set_ylabel("reconstructed $(L, M)$")
+    ax.set_yticks(*ticks(rows, lr, few_r), fontsize=7)
+    ax.set_xlabel("input lensing mode $(L', M')$" if few_c else
+                  "input lensing mode $L'$ (blocks of $M' = -L'..L'$)")
+    ax.set_ylabel("reconstructed $(L, M)$" if few_r else
+                  "reconstructed $L$ (blocks of $M$)")
     ax.grid(False)
     unit = (r"$\hat\phi_{LM}$ per $\phi_{L'M'}$" if S["name"] == "aberration"
             else r"$\hat f_{LM}$ per $\phi_{L'M'}$")
@@ -964,7 +978,8 @@ def write_report(summary, path):
     w(f"| multipoles | {int(S['lmin'])} ≤ ℓ ≤ {int(S['lmax'])} |")
     mask = str(S["mask_kind"])
     w(f"| maps | {float(S['res_arcmin']):g}′ CAR |")
-    mask_name = {"dr6": "ACT DR6 lensing", "planck": "Planck PR3 common (T)"}
+    mask_name = {"dr6": "ACT DR6 lensing", "planck": "Planck PR3 common (T)",
+                 "fq": "Planck PR3 common (T), antipodally symmetric, 10′ smoothed (Ferreira & Quartin)"}
     apod = float(S.get("mask_apod", 0.0))
     w("| mask | " + (f"{mask_name.get(mask, mask)} (`{S['mask_file']}`"
                      + (f", apodized {apod:g}°" if apod > 0 else "")

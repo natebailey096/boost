@@ -13,8 +13,12 @@ different response and options for the mask and the noise level.
     https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/baseline/mask_act_dr6_lensing_v1_healpix_nside_4096_baseline.fits
     --mask   planck        the Planck PR3 common temperature mask (healpix
                            nside 2048, galactic, binary, ~190 MB), rotated to
-                           equatorial and apodized by --mask-apod (0.5 deg):
+                           equatorial, not apodized (--mask-apod to taper):
     https://irsa.ipac.caltech.edu/data/Planck/release_3/ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits
+    --mask   fq            the same file, prepared as Ferreira & Quartin 2021
+                           prepare theirs (github.com/pdsferreira/cmb-aber-dopp,
+                           masksymm): kept only where the antipode is kept too,
+                           smoothed by a 10' FWHM Gaussian, clipped to [0, 1].
     --noise  f150 | act    white noise in T of 24 (f150) or 14 (act) uK-arcmin,
                            sqrt2 x that in P.  Beam, 1/f knees and slopes are
                            the same for both; 600 <= l <= 3000.
@@ -163,8 +167,17 @@ MASK_URL = ("https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/"
             "baseline/mask_act_dr6_lensing_v1_healpix_nside_4096_baseline.fits")
 PLANCK_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_3/"
                    "ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits")
-# Each mask: where to get it, its coordinates, and the default apodization (deg)
-MASKS = {"dr6": (MASK_URL, "equ", 0.0), "planck": (PLANCK_MASK_URL, "gal", 0.5)}
+# Each mask: where to get it, its coordinates, the default cosine apodization
+# (deg), the apodization its cache tag is relative to, and, for fq, the
+# Ferreira & Quartin preparation (antipodally symmetric, smoothed by a 10'
+# FWHM Gaussian).  planck's default apodization was 0.5 deg until it became
+# 0; its tag stays relative to 0.5, so runs made with --mask-apod 0 keep their
+# tag (..._apod0) and caches, and runs made at 0.5 keep theirs.
+MASKS = {"dr6": dict(url=MASK_URL, coord="equ", apod=0.0, tag_apod=0.0),
+         "planck": dict(url=PLANCK_MASK_URL, coord="gal", apod=0.0,
+                        tag_apod=0.5),
+         "fq": dict(url=PLANCK_MASK_URL, coord="gal", apod=0.0, tag_apod=0.0,
+                    symm_fwhm=10.0)}
 # Noise and multipole presets.  knee 0 means no 1/f.  P noise None is sqrt2 x T.
 NOISE_PRESETS = {
     "f150": dict(t=24.0, p=None, beam=1.42, knee=(3000.0, 475.0),
@@ -186,18 +199,21 @@ NOISE_PRESETS = {
 parser = argparse.ArgumentParser(
     description="Doppler boost of the CMB: aberration and modulation, "
                 "measured with two quadratic estimators")
-parser.add_argument("--mask", default="dr6", choices=["none", "dr6", "planck"],
+parser.add_argument("--mask", default="dr6", choices=["none", "dr6", "planck", "fq"],
                     help="none: full sky.  dr6: the ACT DR6 lensing mask "
                          "(equatorial, already apodized).  planck: the Planck "
                          "PR3 common temperature mask (galactic, binary; "
-                         "rotated to equatorial and apodized by --mask-apod)")
+                         "rotated to equatorial, not apodized).  fq: the same "
+                         "file made as Ferreira & Quartin 2021 make theirs: "
+                         "a pixel kept only if its antipode is too, then "
+                         "smoothed by a 10' FWHM Gaussian and clipped to "
+                         "[0, 1] (their masksymm)")
 parser.add_argument("--mask-file", default=None,
                     help="the healpix mask file (default: the --mask one's "
                          "file name, in the working directory)")
 parser.add_argument("--mask-apod", type=float, default=None,
                     help="cosine apodization width in degrees applied to the "
-                         "thresholded mask (default 0 for dr6, which is "
-                         "apodized already, 0.5 for planck)")
+                         "thresholded mask (default 0 for every mask)")
 parser.add_argument("--noise", default="f150", choices=["f150", "act", "planck"],
                     help="noise and multipole preset.  f150: 24 uK-arcmin in "
                          "T, act: 14 uK-arcmin; both 1.4' beam, ACT 1/f knees, "
@@ -333,16 +349,19 @@ LENSED = args.cmb == "lensed"
 # gets its own tag, named after the file, so its sims never mix with those;
 # so does an apodization other than the default.
 if args.mask != "none":
-    _url, MASK_COORD, _apod0 = MASKS[args.mask]
+    _spec = MASKS[args.mask]
+    _url, MASK_COORD = _spec["url"], _spec["coord"]
+    MASK_SYMM = _spec.get("symm_fwhm")    # arcmin, or None
     if args.mask_file is None:
         args.mask_file = os.path.basename(_url)
-    MASK_APOD = _apod0 if args.mask_apod is None else args.mask_apod
+    MASK_APOD = _spec["apod"] if args.mask_apod is None else args.mask_apod
     _mask_stem = os.path.splitext(os.path.basename(args.mask_file))[0]
     _other_mask = os.path.basename(args.mask_file) != os.path.basename(_url)
-    if MASK_APOD != _apod0:
+    if MASK_APOD != _spec["tag_apod"]:
         _OVERRIDES.append(f"apod{MASK_APOD:g}")
 else:
     _url, MASK_COORD, MASK_APOD, _other_mask = None, "equ", 0.0, False
+    MASK_SYMM = None
     args.mask_file = args.mask_file or ""
 # planck18: 33 / 70 uK-arcmin (sims made with the first --noise planck,
 # 45 uK-arcmin in T, were tagged planck_planck)
@@ -484,13 +503,31 @@ px_mod = qe.pixelization(shape=shape, wcs=wcs, dtype=np.float64)
 pixarea = enmap.pixsizemap(shape, wcs, broadcastable=True)
 
 
-def load_mask(path, url, coord="equ", apod=0.0):
+def symmetrize_mask(hmask, fwhm_arcmin):
+    """Ferreira & Quartin's masksymm (cmbaberdopp.py): binary healpix mask ->
+    a pixel kept only if it and its antipode are both kept, then smoothed by
+    a Gaussian of fwhm_arcmin (healpy smoothing, iter=3) and clipped to
+    [0, 1].  HEALPix pixels come in exact antipodal pairs, so the antipode
+    is vec2pix(-pix2vec)."""
+    nside = hp.npix2nside(hmask.size)
+    keep = np.asarray(hmask) > 0.5
+    anti = hp.vec2pix(nside, *(-np.array(hp.pix2vec(nside,
+                                                    np.arange(hmask.size)))))
+    m = (keep & keep[anti]).astype(np.float64)
+    if fwhm_arcmin:
+        m = hp.smoothing(m, fwhm=fwhm_arcmin * utils.arcmin, iter=3)
+    return np.clip(m, 0, 1)
+
+
+def load_mask(path, url, coord="equ", apod=0.0, symm=None):
     """The healpix mask on this CAR grid.  Read at each CAR pixel centre by
     bilinear interpolation, which stays inside [0, 1] where a harmonic
     reprojection rings; a galactic mask (Planck's) is rotated to equatorial
     on the way.  With apod > 0 the mask is thresholded at 0.5 and given a
     cosine edge apod degrees wide, inward from every boundary (point-source
-    holes too).  The result is cached in cache_boost/masks/, written under a
+    holes too).  With symm (arcmin), the healpix mask is first prepared as
+    Ferreira & Quartin do (symmetrize_mask).  The result is cached in
+    cache_boost/masks/, written under a
     temporary name and renamed, so parallel shards read it once."""
     if not os.path.exists(path):
         raise SystemExit(f"mask not found at {path}.  Download it from\n"
@@ -498,6 +535,7 @@ def load_mask(path, url, coord="equ", apod=0.0):
     name = (f"{os.path.splitext(os.path.basename(path))[0]}_"
             f"{os.path.getsize(path)}_car{RES / utils.arcmin:g}"
             + (f"_{coord}" if coord != "equ" else "")
+            + (f"_symm{symm:g}" if symm is not None else "")
             + (f"_apod{apod:g}" if apod > 0 else "") + ".fits")
     car = os.path.join("cache_boost", "masks", name)
     if os.path.exists(car):
@@ -506,6 +544,10 @@ def load_mask(path, url, coord="equ", apod=0.0):
         return enmap.enmap(np.asarray(enmap.read_map(car), np.float64), wcs)
     print(f"mask: {path} -> CAR ...", flush=True)
     hmask = np.clip(np.nan_to_num(hp.read_map(path, dtype=np.float32)), 0, 1)
+    if symm is not None:
+        hmask = symmetrize_mask(hmask, symm)
+        print(f"  antipodally symmetric, smoothed {symm:g}': healpix "
+              f"f_sky {hmask.mean():.4f}", flush=True)
     m = reproject.healpix2map(hmask, shape, wcs, spin=[0], method="spline",
                               order=1,
                               rot=None if coord == "equ" else f"{coord},equ")
@@ -523,7 +565,7 @@ def load_mask(path, url, coord="equ", apod=0.0):
 
 
 if args.mask != "none":
-    MASK = load_mask(args.mask_file, _url, MASK_COORD, MASK_APOD)
+    MASK = load_mask(args.mask_file, _url, MASK_COORD, MASK_APOD, MASK_SYMM)
     W1, W2 = [float((MASK ** n * pixarea).sum() / (4 * np.pi)) for n in (1, 2)]
 else:
     MASK = None                           # full sky: nothing to multiply
@@ -1142,6 +1184,20 @@ def lens_bands(mf, diff, dat, n):
                 n_band_sims=len(idx))
 
 
+def lensphi_at_least(i, n):
+    """Data sim i's cached lensing modes, remade (and re-cached) if the file
+    holds fewer than n: it was written when --lens-lmax was lower.  Cheap,
+    only phi is drawn."""
+    path = cache_path("lensphi", i)
+    r = np.load(path)
+    if len(r) < n:
+        r = lens_modes(3_000_000 + 2 * i)
+        tmp = f"{path}.{os.getpid()}.npy"
+        np.save(tmp, r)
+        os.replace(tmp, path)
+    return r
+
+
 def lens_removed(mf, diff, dat, lens_V):
     """The three dipole estimates of each data sim less the leakage of its
     own lensing modes L' <= LPHI predicted by the lensing response,
@@ -1154,7 +1210,7 @@ def lens_removed(mf, diff, dat, lens_V):
         print("lensing removed: the lensing modes of some data sims are not "
               "cached yet; run the remaining shards")
         return {}
-    r = np.array([np.load(cache_path("lensphi", i)) for i in idx])
+    r = np.array([lensphi_at_least(i, len(PHI_MODES)) for i in idx])
     r = r[:, :len(PHI_MODES)]
     est = solve((ABER_CASE, "MOD"), mf, diff, dat)[5]
     out = {}
