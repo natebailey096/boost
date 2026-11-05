@@ -763,8 +763,8 @@ def plot_lensing_response(S, path):
     the real basis: phi-hat per phi for the lensing (aberration) estimator,
     f-hat per phi for the modulation one.  Without a mask the first is the
     identity and the second zero; a mask mixes L.  Boxes mark L = L'; entries
-    within 2 sd of zero are blank; the linear band of the colour scale is
-    the median MC error on the mean.  S is load(summary, "system") + name."""
+    the linear band of the colour scale is the median MC error on the
+    mean.  S is load(summary, "system") + name."""
     key = "lens_R_ab" if S["name"] == "aberration" else "lens_R_mod"
     pl, pm = S["pack_l"], S["pack_m"]
     rows, V = real_basis(S[key], pl, pm,               # (in mode, out)
@@ -778,7 +778,6 @@ def plot_lensing_response(S, path):
                     for l, m in rows]) / np.sqrt(int(S["n_lens_resp"]))
     thresh = max(float(np.median(err)), 1e-6 * np.abs(V).max())
     vmax = max(np.abs(V).max(), 10 * thresh)
-    V = np.where(np.abs(V) > 2 * err, V, np.nan)      # blank: within 2 sd of 0
     nr, nc = V.shape
     fig, ax = plt.subplots(figsize=(1.6 + 0.26 * nc, 1.4 + 0.26 * nr),
                            layout="constrained")
@@ -804,7 +803,7 @@ def plot_lensing_response(S, path):
     unit = (r"$\hat\phi_{LM}$ per $\phi_{L'M'}$" if S["name"] == "aberration"
             else r"$\hat f_{LM}$ per $\phi_{L'M'}$")
     ax.set_title(f"{TITLES[S['name']]} estimator: response to lensing modes "
-                 f"({int(S['n_lens_resp'])} sims; blank: within 2 sd of 0)",
+                 f"({int(S['n_lens_resp'])} sims)",
                  fontsize=11)
     fig.colorbar(im, ax=ax, fraction=0.04, label=unit)
     fig.savefig(path)
@@ -1094,9 +1093,8 @@ def write_report(summary, path):
           f"{Lm}, are known in the simulation, and the lensing response says "
           "how much velocity each puts into each estimate (lens_V below).  "
           "These estimates subtract it, u − Σ V_L′M′ φ_L′M′.  On the sky φ "
-          "would have to come from outside these data: the reconstruction's "
-          "own L = 2–5 modes cannot separate it from the boost (next "
-          "section).  A full-sky lensing map with reconstruction noise N_L′ "
+          "would have to come from outside these data (an external lensing "
+          "map).  A full-sky lensing map with reconstruction noise N_L′ "
           "per mode would remove only a fraction C_L′/(C_L′ + N_L′) of each "
           "L′'s share, so this is the most such a map could give.  Every "
           "subtracted term has zero mean, so the expected values are "
@@ -1114,64 +1112,6 @@ def write_report(summary, path):
               f"{np.sqrt(np.mean(E[n]['stat_sd'][1:4] ** 2)):.0f} → "
               f"{np.sqrt(np.mean(e['stat_sd'][1:4] ** 2)):.0f} |")
 
-    if "all_by_l" in sy:
-        by_l, nm = sy["all_by_l"], sy["all_n_mode"]
-        lout = len(nm)
-        lmod = int(sy.get("all_mod_lmax", lout))
-        w(f"\n## From the reconstructed modes L ≤ {lout} "
-          "(`*/amplitude_direction_all.png`)\n")
-        w("Can the data themselves remove what contaminates the dipoles?  "
-          f"These estimates use the lensing estimator's modes 1 ≤ L ≤ {lout} "
-          f"and the modulation estimator's to L = {lmod} ({nm[-1]} numbers "
-          "per sim) instead of the six dipoles, weighted by their covariance "
-          "C over the mean-field sims: u = F⁻¹ Aᵀ C⁻¹ (x − x_MF), with A the "
-          "response of every mode to (u_ab, u_mod) from the response sims "
-          "(its L = 1 rows are K).  In a lensed run the mean-field sims are "
-          "lensed, so C holds the lensing at every L′ as well as the noise.  "
-          "A is measured, and in modes where the boost barely shows its "
-          "Monte Carlo noise looks like response and would shrink every "
-          "estimate toward zero; F = Aᵀ C⁻¹ A less that noise's expected "
-          "contribution (estimated from the scatter of the response sims) "
-          "corrects this.  With the dipoles alone it is K⁻¹.  The weights "
-          "come from the mean-field and response sims only, so the data "
-          "sims' scatter measures it fairly; the joint estimate weights the "
-          "two separate ones per axis as before.  Expect a small gain at "
-          "most: aberration is a lensing dipole, and on part of the sky "
-          "large-scale lensing mimics it, so the extra modes cannot "
-          "separate the two (in tests, modes to L = 12 cut the sd by 5–10% "
-          "with or without lensing, even with lensing at L′ = 6–12 raised "
-          "100×).\n")
-        if "all_resp_noise" in sy:
-            rn = sy["all_resp_noise"]
-            w("Share of the response's information that is Monte Carlo noise "
-              "(subtracted), by highest L used: " + ", ".join(
-                  f"L ≤ {l + 1}: {100 * v:.1f}%" for l, v in enumerate(rn))
-              + ".  Above ~15% the estimate is unsteady: use more response "
-                "sims or fewer modes.\n")
-        infl = float(sy["all_var_infl"])
-        w(f"With {n_mf} mean-field sims for {nm[-1]} modes, the noise in C "
-          f"adds about {100 * infl:.1f}% to the variance (it falls as "
-          f"1/n_mf).\n")
-        w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
-          "sd, dipoles only | (mean − expected)/error |\n"
-          "|---|---|---|---|---|---|---|")
-        for n in TITLES:
-            e = load(summary, n + "_all")
-            a, er, sd = e["stat_mean"][0], e["stat_err"][0], e["stat_sd"][0]
-            a_e = expected(e)[1]
-            w(f"| {n} | {a_e:+.4f} | {a:+.4f} | {er:.4f} | {sd:.4f} | "
-              f"{E[n]['stat_sd'][0]:.4f} | {(a - a_e) / er:+.2f} |")
-        w(f"\nsd of one sim as the modes used grow from the dipoles (L ≤ 1, "
-          f"the estimate above) to L ≤ {lout}: A, and the velocity per "
-          "component (rms of x, y, z) in km/s.\n")
-        w("| estimate | " + " | ".join(f"L ≤ {l + 1} ({nm[l]} modes)"
-                                       for l in range(lout))
-          + " |\n|---|" + "---|" * lout)
-        for k, n in enumerate(TITLES):
-            w(f"| {n} | " + " | ".join(
-                f"{by_l[l, k, 1, 0]:.4f}, "
-                f"{np.sqrt(np.mean(by_l[l, k, 1, 1:4] ** 2)):.0f} km/s"
-                for l in range(lout)) + " |")
 
     label = ["A", "v_x [km/s]", "v_y [km/s]", "v_z [km/s]", "ℓ [deg]",
              "b [deg]"]
@@ -1373,18 +1313,6 @@ def make_all(summary, outdir=None):
         S = load(summary, name)
         for fn in fns:
             save(fn, S, os.path.join(folder, fn.__name__[5:] + ".png"))
-    if "aberration_all.amp" in np.load(summary).files:
-        sy0 = load(summary, "system")
-        lout, lmod = int(np.max(sy0["pack_l"])), int(sy0.get("all_mod_lmax",
-                                                             np.max(sy0["pack_l"])))
-        for name in TITLES:
-            S = load(summary, name + "_all")
-            S0 = load(summary, name)
-            S.update(amp_dipole=S0["amp"], dir_dipole=S0["dir"],
-                     variant=f"modes L ≤ {lout}" + (
-                         f" (modulation L ≤ {lmod})" if lmod < lout else ""))
-            save(plot_amplitude_direction, S,
-                 os.path.join(outdir, name, "amplitude_direction_all.png"))
     if "aberration_lens.amp" in np.load(summary).files:
         for name in TITLES:
             S = load(summary, name + "_lens")
