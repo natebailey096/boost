@@ -168,14 +168,12 @@ MASK_URL = ("https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/"
 PLANCK_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_3/"
                    "ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits")
 # Each mask: where to get it, its coordinates, the default cosine apodization
-# (deg), the apodization its cache tag is relative to, and, for fq, the
-# Ferreira & Quartin preparation (antipodally symmetric, smoothed by a 10'
-# FWHM Gaussian).  planck's default apodization was 0.5 deg until it became
-# 0; its tag stays relative to 0.5, so runs made with --mask-apod 0 keep their
-# tag (..._apod0) and caches, and runs made at 0.5 keep theirs.
+# (deg), the apodization its cache tag is relative to (any other adds
+# _apod<deg> to the tag), and, for fq, the Ferreira & Quartin preparation
+# (antipodally symmetric, smoothed by a 10' FWHM Gaussian).
 MASKS = {"dr6": dict(url=MASK_URL, coord="equ", apod=0.0, tag_apod=0.0),
          "planck": dict(url=PLANCK_MASK_URL, coord="gal", apod=0.0,
-                        tag_apod=0.5),
+                        tag_apod=0.0),
          "fq": dict(url=PLANCK_MASK_URL, coord="gal", apod=0.0, tag_apod=0.0,
                     symm_fwhm=10.0)}
 # Noise and multipole presets.  knee 0 means no 1/f.  P noise None is sqrt2 x T.

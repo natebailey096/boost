@@ -170,44 +170,69 @@ def unlensed_sibling(summary, S):
 
 
 def plot_coverage(S, path):
-    """Mask in equatorial Mollweide, RA increasing to the left, centred on
-    RA 0, dec 0, with the galactic plane and the dipole axis."""
-    def x_of(ra):
-        return -np.radians((np.asarray(ra) + 180) % 360 - 180)
+    """Mask in two Mollweide panels, longitude increasing to the left and
+    centred on 0: equatorial (RA, dec) on top with the galactic plane, and
+    galactic (l, b) below with the celestial equator.  Both mark the input
+    dipole and its antipode."""
+    def x_of(lon):
+        return -np.radians((np.asarray(lon) + 180) % 360 - 180)
 
     if "mask_thumb" in S:
-        ra_ax, dec_ax, W = S["mask_ra"], S["mask_dec"], S["mask_thumb"]
+        ra_ax, dec_ax, W = (np.asarray(S["mask_ra"]), np.asarray(S["mask_dec"]),
+                            np.asarray(S["mask_thumb"]))
     else:                                   # --mask none: the full sky
         ra_ax, dec_ax = np.linspace(0, 360, 361), np.linspace(-90, 90, 181)
         W = np.ones((dec_ax.size, ra_ax.size), np.float32)
-    x = x_of(ra_ax)
-    order = np.argsort(x)
-    fig = plt.figure(figsize=(9, 5))
-    ax = fig.add_subplot(projection="mollweide")
-    W = W[:, order]
-    pcm = ax.pcolormesh(x[order], np.radians(dec_ax),
-                        np.where(W > 1e-3, W, np.nan), cmap="Blues",
-                        vmin=0, vmax=1, shading="auto", rasterized=True)
-    ra, dec = lonlat(unit(np.linspace(0, 360, 721), 0.0) @ EQU2GAL)
-    xs = x_of(ra)
-    cut = np.flatnonzero(np.abs(np.diff(xs)) > np.pi) + 1
-    for xx, yy in zip(np.split(xs, cut), np.split(np.radians(dec), cut)):
-        ax.plot(xx, yy, color=TRUTH, ls="--", lw=1.5)
-    ra_d, dec_d = lonlat(S["d_true"])
-    ax.plot(x_of(ra_d), np.radians(dec_d), "*", ms=16, mfc="gold", mec=INK,
-            label="input dipole")
-    ax.plot(x_of(ra_d + 180), np.radians(-dec_d), "*", ms=12, mfc="none",
-            mec=INK, label="antipode")
-    ax.plot([], [], color=TRUTH, ls="--", label="galactic plane")
-    xt = np.radians(np.arange(-150, 151, 30))
-    ax.set_xticks(xt, [f"{(-d) % 360:.0f}" for d in np.degrees(xt)],
-                  fontsize=8)
-    ax.set_title(f"mask {str(S['mask_kind'])}, "
-                 f"f_sky = {float(S['fsky']):.3f}")
-    fig.colorbar(pcm, orientation="horizontal", shrink=0.4, pad=0.06,
+
+    # The same mask on a galactic grid: each (l, b) pixel centre rotated to
+    # (RA, dec) and read from the nearest pixel of the equatorial thumbnail.
+    l_ax, b_ax = np.arange(0.25, 360, 0.5), np.arange(-89.75, 90, 0.5)
+    ra_g, dec_g = lonlat(unit(*np.meshgrid(l_ax, b_ax)) @ EQU2GAL)
+    dra, ddec = ra_ax[1] - ra_ax[0], dec_ax[1] - dec_ax[0]
+    i_ra = np.rint(((ra_g - ra_ax[0] + 540) % 360 - 180) / dra).astype(int) % ra_ax.size
+    i_dec = np.clip(np.rint((dec_g - dec_ax[0]) / ddec).astype(int), 0,
+                    dec_ax.size - 1)
+    W_gal = W[i_dec, i_ra]
+
+    d_equ = np.asarray(S["d_true"], float)
+    d_gal = d_equ @ EQU2GAL.T               # row vectors: gal @ EQU2GAL = equ
+    circle = unit(np.linspace(0, 360, 721), 0.0)
+    panels = [
+        ("equatorial", "RA", "dec", ra_ax, dec_ax, W,
+         lonlat(circle @ EQU2GAL), "galactic plane", lonlat(d_equ)),
+        ("galactic", "l", "b", l_ax, b_ax, W_gal,
+         lonlat(circle @ EQU2GAL.T), "celestial equator", lonlat(d_gal)),
+    ]
+    fig = plt.figure(figsize=(9, 9.5), layout="constrained")
+    for k, (frame, lon_name, lat_name, lon_ax, lat_ax, M, (pl, pb),
+            plane, (dl, db)) in enumerate(panels):
+        ax = fig.add_subplot(2, 1, k + 1, projection="mollweide")
+        x = x_of(lon_ax)
+        order = np.argsort(x)
+        Mo = np.asarray(M)[:, order]
+        pcm = ax.pcolormesh(x[order], np.radians(lat_ax),
+                            np.where(Mo > 1e-3, Mo, np.nan), cmap="Blues",
+                            vmin=0, vmax=1, shading="auto", rasterized=True)
+        xs = x_of(pl)
+        cut = np.flatnonzero(np.abs(np.diff(xs)) > np.pi) + 1
+        for xx, yy in zip(np.split(xs, cut), np.split(np.radians(pb), cut)):
+            ax.plot(xx, yy, color=TRUTH, ls="--", lw=1.5)
+        ax.plot(x_of(dl), np.radians(db), "*", ms=16, mfc="gold", mec=INK,
+                label="input dipole")
+        ax.plot(x_of(dl + 180), np.radians(-db), "*", ms=12, mfc="none",
+                mec=INK, label="antipode")
+        ax.plot([], [], color=TRUTH, ls="--", label=plane)
+        xt = np.radians(np.arange(-150, 151, 30))
+        ax.set_xticks(xt, [f"{(-d) % 360:.0f}" for d in np.degrees(xt)],
+                      fontsize=8)
+        ax.set_title(f"{frame} ({lon_name}, {lat_name}); input dipole at "
+                     f"{lon_name} = {dl:.1f}°, {lat_name} = {db:+.1f}°",
+                     fontsize=10)
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.22), ncol=3,
+                  fontsize=9)
+    fig.suptitle(f"mask {str(S['mask_kind'])}, f_sky = {float(S['fsky']):.3f}")
+    fig.colorbar(pcm, ax=fig.axes, orientation="horizontal", shrink=0.4,
                  label="mask weight")
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.5), ncol=3,
-              fontsize=9)
     fig.savefig(path)
     plt.close(fig)
 
