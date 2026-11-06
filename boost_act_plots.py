@@ -395,6 +395,55 @@ def plot_response_6x6(S, path):
     plt.close(fig)
 
 
+def _plot_cov(S, path, M, labels, title, note):
+    """One 6x6 covariance in (km/s)^2, annotated in units of 10^3 (km/s)^2,
+    with each component's sd in its tick label."""
+    sd = np.sqrt(np.diag(M))
+    ticks = [f"{l}\n(sd {s:.0f})" for l, s in zip(labels, sd)]
+    fig, ax = plt.subplots(figsize=(8.2, 7.2), layout="constrained")
+    v = np.abs(M).max()
+    im = ax.imshow(M / 1e3, cmap="RdBu_r", vmin=-v / 1e3, vmax=v / 1e3)
+    for i in range(6):
+        for j in range(6):
+            ax.text(j, i, f"{M[i, j] / 1e3:+.2f}", ha="center", va="center",
+                    fontsize=9)
+    ax.axhline(2.5, color="k", lw=1.5)
+    ax.axvline(2.5, color="k", lw=1.5)
+    ax.set_yticks(range(6), ticks, fontsize=8.5)
+    ax.set_xticks(range(6), ticks, fontsize=8.5)
+    ax.grid(False)
+    fig.colorbar(im, ax=ax, fraction=0.046, label=r"$10^3$ (km/s)$^2$")
+    split = " (split-noise estimator)" if bool(S.get("split_noise", False)) else ""
+    ax.set_title(title + split, fontsize=11)
+    fig.supxlabel(note, fontsize=8.5)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_covariance(S, path):
+    """Covariance of the six measured components after hardening, the
+    separate estimates (u_ab, u_mod) = K^-1 (y - mean field), over the data
+    sims."""
+    _plot_cov(S, path, np.asarray(S["cov_hard"]),
+              ["$u_{ab}$ x", "$u_{ab}$ y", "$u_{ab}$ z",
+               "$u_{mod}$ x", "$u_{mod}$ y", "$u_{mod}$ z"],
+              r"covariance of the separate estimates $K^{-1}(y - \bar{y}_{\rm MF})$",
+              f"over the {int(S['n_cov'])} data sims, c u in km/s, equatorial "
+              "x, y, z; annotated in $10^3$ (km/s)$^2$")
+
+
+def plot_covariance_unhardened(S, path):
+    """Covariance of the six estimator dipoles y before hardening (each
+    estimator's full-sky normalised L = 1 vector), over the data sims."""
+    _plot_cov(S, path, np.asarray(S["cov_raw"]),
+              ["aber QE x", "aber QE y", "aber QE z",
+               "mod QE x", "mod QE y", "mod QE z"],
+              "covariance of the estimator dipoles $y$ before hardening",
+              f"over the {int(S['n_cov'])} data sims, full-sky normalised "
+              "(c y in km/s), equatorial x, y, z; annotated in $10^3$ "
+              "(km/s)$^2$")
+
+
 VPAR = (r"velocity along the input direction, "
         r"$v_\parallel = \mathbf{v}\cdot\hat{\mathbf{v}}_{\rm in}$ [km/s]")
 
@@ -1021,6 +1070,10 @@ def write_report(summary, path):
       f"{knees}; zero below ℓ = {int(S['lmin'])} |")
     if lmax_pol < int(S["lmax"]):
         w(f"| E, B multipoles | {int(S['lmin'])} ≤ ℓ ≤ {lmax_pol} |")
+    if bool(S.get("split_noise", False)):
+        w("| mean field and data | two-split cross estimate q(X) − q(d), "
+          "d the noise-only half-difference map (`--split-noise`): no "
+          "instrument-noise mean field |")
     w(f"| input boost | β = {float(S['beta']):.4e} = "
       f"{np.linalg.norm(v_in):.1f} km/s toward galactic ℓ = {l_in:.2f}°, "
       f"b = {b_in:+.2f}° (ra {ra_in:.2f}°, dec {dec_in:+.2f}°) |")
@@ -1104,6 +1157,13 @@ def write_report(summary, path):
     w(f"\nMean field relative to the input boost, |mean field| / |u_in| "
       f"(L = 1 dipoles): aberration QE {mfu[0]:.2f}, modulation QE "
       f"{mfu[1]:.2f}.\n")
+    if "mf_noise_over_u" in sy:
+        st, nz = sy["mf_std_over_u"], sy["mf_noise_over_u"]
+        w(f"With `--split-noise` that is the cross estimate's, which has no "
+          f"instrument-noise part.  The standard estimate's is "
+          f"{st[0]:.2f} (aberration) and {st[1]:.2f} (modulation); the "
+          f"noise-only maps alone give {nz[0]:.2f} and {nz[1]:.2f}, the "
+          "noise part the cross estimate removes.\n")
     if "w_joint" in sy:
         w("Joint weight on the aberration estimate (modulation gets 1 − w), "
           "x, y, z: " + ", ".join(f"{v:.3f}" for v in sy["w_joint"]) + ".\n")
@@ -1113,6 +1173,20 @@ def write_report(summary, path):
     for i in range(6):
         w(f"| {comp[i]} QE | " + " | ".join(f"{sy['corr'][i, j]:+.3f}"
                                            for j in range(6)) + " |")
+
+    if "cov_hard" in sy:
+        for key, what, fig, rows in (
+                ("cov_hard", "the separate estimates K⁻¹(y − ȳ_MF)",
+                 "covariance.png", [f"u_{c}" for c in comp]),
+                ("cov_raw", "the estimator dipoles y before hardening",
+                 "covariance_unhardened.png", [f"{c} QE" for c in comp])):
+            M = np.asarray(sy[key])
+            w(f"\nCovariance of {what} over the {int(sy['n_cov'])} data "
+              f"sims (`{fig}`), (km/s)²:\n")
+            w("| | " + " | ".join(rows) + " |\n|---|" + "---|" * 6)
+            for i in range(6):
+                w(f"| {rows[i]} | " + " | ".join(f"{M[i, j]:+.0f}"
+                                                 for j in range(6)) + " |")
 
     w("\n## The three estimates side by side (`comparison.png`)\n")
     w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
@@ -1384,6 +1458,10 @@ def make_all(summary, outdir=None):
                   "current one with the same options (it reuses the cached "
                   "sims)")
     sy = load(summary, "system")
+    if "cov_hard" in sy:                       # summaries from before lack it
+        save(plot_covariance, sy, os.path.join(outdir, "covariance.png"))
+        save(plot_covariance_unhardened, sy,
+             os.path.join(outdir, "covariance_unhardened.png"))
     if "lens_V" in sy:                         # --cmb lensed runs only
         for name in ("aberration", "modulation"):
             save(plot_lensing_response, {**sy, "name": name},
