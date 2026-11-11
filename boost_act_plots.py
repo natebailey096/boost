@@ -396,23 +396,23 @@ def plot_response_6x6(S, path):
 
 
 def _plot_cov(S, path, M, labels, title, note):
-    """One 6x6 covariance in (km/s)^2, annotated in units of 10^3 (km/s)^2,
-    with each component's sd in its tick label."""
+    """One 6x6 covariance shown as its correlation matrix,
+    rho_ij = C_ij / (sd_i sd_j), between -1 and 1.  The sds and the
+    covariance itself are in report.md."""
     sd = np.sqrt(np.diag(M))
-    ticks = [f"{l}\n(sd {s:.0f})" for l, s in zip(labels, sd)]
+    R = M / np.outer(sd, sd)
     fig, ax = plt.subplots(figsize=(8.2, 7.2), layout="constrained")
-    v = np.abs(M).max()
-    im = ax.imshow(M / 1e3, cmap="RdBu_r", vmin=-v / 1e3, vmax=v / 1e3)
+    im = ax.imshow(R, cmap="RdBu_r", vmin=-1, vmax=1)
     for i in range(6):
         for j in range(6):
-            ax.text(j, i, f"{M[i, j] / 1e3:+.2f}", ha="center", va="center",
-                    fontsize=9)
+            ax.text(j, i, f"{R[i, j]:+.2f}", ha="center", va="center",
+                    fontsize=9, color="w" if abs(R[i, j]) > 0.75 else "k")
     ax.axhline(2.5, color="k", lw=1.5)
     ax.axvline(2.5, color="k", lw=1.5)
-    ax.set_yticks(range(6), ticks, fontsize=8.5)
-    ax.set_xticks(range(6), ticks, fontsize=8.5)
+    ax.set_yticks(range(6), labels, fontsize=9)
+    ax.set_xticks(range(6), labels, fontsize=9)
     ax.grid(False)
-    fig.colorbar(im, ax=ax, fraction=0.046, label=r"$10^3$ (km/s)$^2$")
+    fig.colorbar(im, ax=ax, fraction=0.046, label="correlation coefficient")
     split = " (split-noise estimator)" if bool(S.get("split_noise", False)) else ""
     ax.set_title(title + split, fontsize=11)
     fig.supxlabel(note, fontsize=8.5)
@@ -427,9 +427,8 @@ def plot_covariance(S, path):
     _plot_cov(S, path, np.asarray(S["cov_hard"]),
               ["$u_{ab}$ x", "$u_{ab}$ y", "$u_{ab}$ z",
                "$u_{mod}$ x", "$u_{mod}$ y", "$u_{mod}$ z"],
-              r"covariance of the separate estimates $K^{-1}(y - \bar{y}_{\rm MF})$",
-              f"over the {int(S['n_cov'])} data sims, c u in km/s, equatorial "
-              "x, y, z; annotated in $10^3$ (km/s)$^2$")
+              r"correlation of the separate estimates $K^{-1}(y - \bar{y}_{\rm MF})$",
+              f"{int(S['n_cov'])} data sims")
 
 
 def plot_covariance_unhardened(S, path):
@@ -438,10 +437,8 @@ def plot_covariance_unhardened(S, path):
     _plot_cov(S, path, np.asarray(S["cov_raw"]),
               ["aber QE x", "aber QE y", "aber QE z",
                "mod QE x", "mod QE y", "mod QE z"],
-              "covariance of the estimator dipoles $y$ before hardening",
-              f"over the {int(S['n_cov'])} data sims, full-sky normalised "
-              "(c y in km/s), equatorial x, y, z; annotated in $10^3$ "
-              "(km/s)$^2$")
+              "correlation of the estimator dipoles $y$ before hardening",
+              f"{int(S['n_cov'])} data sims")
 
 
 VPAR = (r"velocity along the input direction, "
@@ -1187,6 +1184,15 @@ def write_report(summary, path):
             for i in range(6):
                 w(f"| {rows[i]} | " + " | ".join(f"{M[i, j]:+.0f}"
                                                  for j in range(6)) + " |")
+            sd = np.sqrt(np.diag(M))
+            w("\nsd (km/s): " + ", ".join(f"{r} {s:.0f}"
+                                          for r, s in zip(rows, sd)))
+            w(f"\nCorrelation ρ = C / (sd sd), as plotted (error about "
+              f"{1 / np.sqrt(int(sy['n_cov']) - 1):.3f} near 0):\n")
+            w("| | " + " | ".join(rows) + " |\n|---|" + "---|" * 6)
+            for i in range(6):
+                w(f"| {rows[i]} | " + " | ".join(
+                    f"{M[i, j] / (sd[i] * sd[j]):+.3f}" for j in range(6)) + " |")
 
     w("\n## The three estimates side by side (`comparison.png`)\n")
     w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
