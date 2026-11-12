@@ -427,7 +427,12 @@ if args.mask != "none":
     _mask_stem = os.path.splitext(os.path.basename(args.mask_file))[0]
     _other_mask = os.path.basename(args.mask_file) != os.path.basename(_url)
     if MASK_APOD != _spec["tag_apod"]:
-        _OVERRIDES.append(f"apod{MASK_APOD:g}")
+        # v2: the taper starts only at the mask's own edges.  Before, pixell's
+        # apod_mask (edge=True) also treated the CAR map's border as masked,
+        # so every apodized mask lost a strip of width --mask-apod along
+        # RA = 180 deg and caps at the poles; sims made with that mask keep
+        # the old tag (..._apod<deg>) and are not reused.
+        _OVERRIDES.append(f"apod{MASK_APOD:g}v2")
 else:
     _url, MASK_COORD, MASK_APOD, _other_mask = None, "equ", 0.0, False
     MASK_SYMM = None
@@ -625,7 +630,7 @@ def load_mask(path, url, coord="equ", apod=0.0, symm=None, field=0):
             + (f"_field{field}" if field else "")
             + (f"_{coord}" if coord != "equ" else "")
             + (f"_symm{symm:g}" if symm is not None else "")
-            + (f"_apod{apod:g}" if apod > 0 else "") + ".fits")
+            + (f"_apod{apod:g}v2" if apod > 0 else "") + ".fits")
     car = os.path.join("cache_boost", "masks", name)
     if os.path.exists(car):
         if not IN_WORKER:
@@ -645,7 +650,11 @@ def load_mask(path, url, coord="equ", apod=0.0, symm=None, field=0):
     del hmask
     m = enmap.enmap(np.asarray(m, np.float64).reshape(shape), wcs)
     if apod > 0:
+        # edge=False: on this full-sky grid the map's border (RA = 180 deg
+        # and the poles) is not a mask edge; the distance transform wraps in
+        # RA, so a real edge near RA = 180 deg is tapered on both sides.
         m = enmap.apod_mask(enmap.enmap((m > 0.5).astype(np.float64), wcs),
+                            edge=False,
                             width=apod * utils.degree)
         m = enmap.enmap(np.clip(np.asarray(m, np.float64), 0, 1), wcs)
     os.makedirs(os.path.dirname(car), exist_ok=True)
