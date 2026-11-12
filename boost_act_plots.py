@@ -1123,6 +1123,9 @@ def write_report(summary, path):
     w(f"| maps | {float(S['res_arcmin']):g}′ CAR |")
     mask_name = {"dr6": "ACT DR6 lensing", "planck": "Planck PR3 common (T)",
                  "fq": "Planck PR3 common (T), antipodally symmetric, 10′ smoothed (Ferreira & Quartin)"}
+    if mask.startswith("gal") and mask[3:].isdigit():
+        mask_name[mask] = (f"Planck HFI Galactic plane GAL{mask[3:]} "
+                           f"({int(mask[3:])}% of the sky kept)")
     apod = float(S.get("mask_apod", 0.0))
     w("| mask | " + (f"{mask_name.get(mask, mask)} (`{S['mask_file']}`"
                      + (f", apodized {apod:g}°" if apod > 0 else "")

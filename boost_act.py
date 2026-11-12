@@ -15,7 +15,15 @@ different response and options for the mask and the noise level.
                            nside 2048, galactic, binary, ~190 MB), rotated to
                            equatorial, not apodized (--mask-apod to taper):
     https://irsa.ipac.caltech.edu/data/Planck/release_3/ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits
-    --mask   fq            the same file, prepared as Ferreira & Quartin 2021
+    --mask   galplane      a Planck HFI Galactic-plane mask (healpix nside
+                           2048, galactic, binary, 8 columns in one file,
+                           ~384 MB), the column chosen with --gal-cut
+                           (20, 40, 60, 70, 80, 90, 97 or 99 % of the sky
+                           kept; default 70, the Planck 2013 Doppler-boost
+                           sky fraction), rotated to equatorial, not
+                           apodized (--mask-apod to taper):
+    https://irsa.ipac.caltech.edu/data/Planck/release_2/ancillary-data/masks/HFI_Mask_GalPlane-apo0_2048_R2.00.fits
+    --mask   fq            the planck file, prepared as Ferreira & Quartin 2021
                            prepare theirs (github.com/pdsferreira/cmb-aber-dopp,
                            masksymm): kept only where the antipode is kept too,
                            smoothed by a 10' FWHM Gaussian, clipped to [0, 1].
@@ -28,6 +36,12 @@ different response and options for the mask and the noise level.
                            Quartin 2021); 143 GHz.  --noise-t,
                            --noise-p, --beam, --lmin, --lmax, --lmax-pol and
                            --freq override a preset, and add to the cache tag.
+    --noise  planck143 | planck217
+                           the single-frequency maps of the Planck 2013
+                           Doppler-boost paper (1303.5087, Sect. 4): 45 / 60
+                           uK-arcmin white noise, 7' / 5' beam, 500 <= l <=
+                           2000, 143 / 217 GHz; temperature only (P noise
+                           1e5 uK-arcmin), as in that paper.
 
 Needs the falafel branch darby_birefringence_patchytau and the tempura branch
 darbys_tau_edits2 (the ACT DR6 screening versions); it stops at start-up if
@@ -181,6 +195,10 @@ MASK_URL = ("https://phy-act1.princeton.edu/public/data/dr6_lensing_v1/maps/"
             "baseline/mask_act_dr6_lensing_v1_healpix_nside_4096_baseline.fits")
 PLANCK_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_3/"
                    "ancillary-data/masks/COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits")
+GALPLANE_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_2/"
+                     "ancillary-data/masks/HFI_Mask_GalPlane-apo0_2048_R2.00.fits")
+# The columns of the Galactic-plane file, by the % of sky each keeps.
+GAL_CUTS = (20, 40, 60, 70, 80, 90, 97, 99)
 # Each mask: where to get it, its coordinates, the default cosine apodization
 # (deg), the apodization its cache tag is relative to (any other adds
 # _apod<deg> to the tag), and, for fq, the Ferreira & Quartin preparation
@@ -188,6 +206,8 @@ PLANCK_MASK_URL = ("https://irsa.ipac.caltech.edu/data/Planck/release_3/"
 MASKS = {"dr6": dict(url=MASK_URL, coord="equ", apod=0.0, tag_apod=0.0),
          "planck": dict(url=PLANCK_MASK_URL, coord="gal", apod=0.0,
                         tag_apod=0.0),
+         "galplane": dict(url=GALPLANE_MASK_URL, coord="gal", apod=0.0,
+                          tag_apod=0.0),
          "fq": dict(url=PLANCK_MASK_URL, coord="gal", apod=0.0, tag_apod=0.0,
                     symm_fwhm=10.0)}
 # Noise and multipole presets.  knee 0 means no 1/f.  P noise None is sqrt2 x T.
@@ -203,6 +223,16 @@ NOISE_PRESETS = {
     "planck": dict(t=33.0, p=70.0, beam=5.0, knee=(0.0, 0.0),
                    alpha=(-3.0, -4.5), lmin=200, lmax=1800, lmax_pol=1150,
                    freq=143.0),
+    # planck143, planck217: the single-frequency maps of the Planck 2013
+    # Doppler-boost paper (1303.5087, Sect. 4): white noise of 45 and 60
+    # uK-arcmin, 7' and 5' beams, 500 <= l <= 2000.  Temperature only, as
+    # there: P noise 1e5 uK-arcmin, so E and B carry no information.
+    "planck143": dict(t=45.0, p=1e5, beam=7.0, knee=(0.0, 0.0),
+                      alpha=(-3.0, -4.5), lmin=500, lmax=2000, lmax_pol=2000,
+                      freq=143.0),
+    "planck217": dict(t=60.0, p=1e5, beam=5.0, knee=(0.0, 0.0),
+                      alpha=(-3.0, -4.5), lmin=500, lmax=2000, lmax_pol=2000,
+                      freq=217.0),
 }
 
 
@@ -211,30 +241,42 @@ NOISE_PRESETS = {
 parser = argparse.ArgumentParser(
     description="Doppler boost of the CMB: aberration and modulation, "
                 "measured with two quadratic estimators")
-parser.add_argument("--mask", default="dr6", choices=["none", "dr6", "planck", "fq"],
+parser.add_argument("--mask", default="dr6",
+                    choices=["none", "dr6", "planck", "galplane", "fq"],
                     help="none: full sky.  dr6: the ACT DR6 lensing mask "
                          "(equatorial, already apodized).  planck: the Planck "
                          "PR3 common temperature mask (galactic, binary; "
-                         "rotated to equatorial, not apodized).  fq: the same "
+                         "rotated to equatorial, not apodized).  galplane: a "
+                         "Planck HFI Galactic-plane mask, the column chosen "
+                         "with --gal-cut (galactic, binary; rotated to "
+                         "equatorial, not apodized).  fq: the planck "
                          "file made as Ferreira & Quartin 2021 make theirs: "
                          "a pixel kept only if its antipode is too, then "
                          "smoothed by a 10' FWHM Gaussian and clipped to "
                          "[0, 1] (their masksymm)")
+parser.add_argument("--gal-cut", type=int, default=70, choices=GAL_CUTS,
+                    help="with --mask galplane: the %% of sky the Galactic-"
+                         "plane mask keeps, i.e. which column of the file "
+                         "(GAL020 ... GAL099) is read (default 70)")
 parser.add_argument("--mask-file", default=None,
                     help="the healpix mask file (default: the --mask one's "
                          "file name, in the working directory)")
 parser.add_argument("--mask-apod", type=float, default=None,
                     help="cosine apodization width in degrees applied to the "
                          "thresholded mask (default 0 for every mask)")
-parser.add_argument("--noise", default="f150", choices=["f150", "act", "planck"],
+parser.add_argument("--noise", default="f150",
+                    choices=["f150", "act", "planck", "planck143", "planck217"],
                     help="noise and multipole preset.  f150: 24 uK-arcmin in "
                          "T, act: 14 uK-arcmin; both 1.4' beam, ACT 1/f knees, "
                          "600 <= l <= 3000, 150 GHz.  planck: "
                          "33 uK-arcmin in T and 70 in P "
                          "(Planck 2018 143 GHz), 5' beam, white, "
                          "200 <= l <= 1800 with E and B to 1150 (as Ferreira "
-                         "& Quartin 2021), 143 GHz.  P is sqrt2 x T unless "
-                         "--noise-p")
+                         "& Quartin 2021), 143 GHz.  planck143, planck217: "
+                         "the Planck 2013 Doppler-boost single-frequency maps "
+                         "(1303.5087): 45 / 60 uK-arcmin, 7' / 5' beam, "
+                         "white, 500 <= l <= 2000, temperature only (P noise "
+                         "1e5).  P is sqrt2 x T unless --noise-p")
 parser.add_argument("--noise-t", type=float, default=None,
                     help="override the preset's T white noise, uK-arcmin")
 parser.add_argument("--noise-p", type=float, default=None,
@@ -376,6 +418,9 @@ if args.mask != "none":
     _spec = MASKS[args.mask]
     _url, MASK_COORD = _spec["url"], _spec["coord"]
     MASK_SYMM = _spec.get("symm_fwhm")    # arcmin, or None
+    # The healpix column to read: GAL0xx of the Galactic-plane file, else 0.
+    MASK_FIELD = (GAL_CUTS.index(args.gal_cut) if args.mask == "galplane"
+                  else 0)
     if args.mask_file is None:
         args.mask_file = os.path.basename(_url)
     MASK_APOD = _spec["apod"] if args.mask_apod is None else args.mask_apod
@@ -386,10 +431,15 @@ if args.mask != "none":
 else:
     _url, MASK_COORD, MASK_APOD, _other_mask = None, "equ", 0.0, False
     MASK_SYMM = None
+    MASK_FIELD = 0
     args.mask_file = args.mask_file or ""
+# The mask's name in the cache tag and summary: galplane is named by its cut
+# (gal070, ...), so each column keeps its own sims.
+MASK_LABEL = (f"gal{args.gal_cut:03d}" if args.mask == "galplane"
+              else args.mask)
 # planck18: 33 / 70 uK-arcmin (sims made with the first --noise planck,
 # 45 uK-arcmin in T, were tagged planck_planck)
-CACHE_TAG = (f"{args.mask}_{'planck18' if args.noise == 'planck' else args.noise}"
+CACHE_TAG = (f"{MASK_LABEL}_{'planck18' if args.noise == 'planck' else args.noise}"
              + (f"_{''.join(c if c.isalnum() or c in '-.' else '_' for c in _mask_stem)}"
                 if _other_mask else "")
              + "".join(f"_{o}" for o in _OVERRIDES)
@@ -555,14 +605,16 @@ def symmetrize_mask(hmask, fwhm_arcmin):
     return np.clip(m, 0, 1)
 
 
-def load_mask(path, url, coord="equ", apod=0.0, symm=None):
+def load_mask(path, url, coord="equ", apod=0.0, symm=None, field=0):
     """The healpix mask on this CAR grid.  Read at each CAR pixel centre by
     bilinear interpolation, which stays inside [0, 1] where a harmonic
     reprojection rings; a galactic mask (Planck's) is rotated to equatorial
     on the way.  With apod > 0 the mask is thresholded at 0.5 and given a
     cosine edge apod degrees wide, inward from every boundary (point-source
     holes too).  With symm (arcmin), the healpix mask is first prepared as
-    Ferreira & Quartin do (symmetrize_mask).  The result is cached in
+    Ferreira & Quartin do (symmetrize_mask).  field is the column of the
+    file to read (the cut of the Galactic-plane masks; 0 for the others).
+    The result is cached in
     cache_boost/masks/, written under a
     temporary name and renamed, so parallel shards read it once."""
     if not os.path.exists(path):
@@ -570,6 +622,7 @@ def load_mask(path, url, coord="equ", apod=0.0, symm=None):
                          f"{url}\nor give its location with --mask-file.")
     name = (f"{os.path.splitext(os.path.basename(path))[0]}_"
             f"{os.path.getsize(path)}_car{RES / utils.arcmin:g}"
+            + (f"_field{field}" if field else "")
             + (f"_{coord}" if coord != "equ" else "")
             + (f"_symm{symm:g}" if symm is not None else "")
             + (f"_apod{apod:g}" if apod > 0 else "") + ".fits")
@@ -579,7 +632,9 @@ def load_mask(path, url, coord="equ", apod=0.0, symm=None):
             print(f"mask: {car}", flush=True)
         return enmap.enmap(np.asarray(enmap.read_map(car), np.float64), wcs)
     print(f"mask: {path} -> CAR ...", flush=True)
-    hmask = np.clip(np.nan_to_num(hp.read_map(path, dtype=np.float32)), 0, 1)
+    # read_map turns NESTED files (the Galactic-plane masks) into RING
+    hmask = np.clip(np.nan_to_num(hp.read_map(path, field=field,
+                                              dtype=np.float32)), 0, 1)
     if symm is not None:
         hmask = symmetrize_mask(hmask, symm)
         print(f"  antipodally symmetric, smoothed {symm:g}': healpix "
@@ -601,7 +656,8 @@ def load_mask(path, url, coord="equ", apod=0.0, symm=None):
 
 
 if args.mask != "none":
-    MASK = load_mask(args.mask_file, _url, MASK_COORD, MASK_APOD, MASK_SYMM)
+    MASK = load_mask(args.mask_file, _url, MASK_COORD, MASK_APOD, MASK_SYMM,
+                     MASK_FIELD)
     W1, W2 = [float((MASK ** n * pixarea).sum() / (4 * np.pi)) for n in (1, 2)]
 else:
     MASK = None                           # full sky: nothing to multiply
@@ -1347,7 +1403,7 @@ def analyse(mf, diff, dat):
 
 
 def main():
-    print(f"mask {args.mask}"
+    print(f"mask {MASK_LABEL}"
           + (f" ({args.mask_file})" if MASK is not None else " (full sky)")
           + f", noise {args.noise} ({NOISE_T:g} uK-arcmin in T, "
           f"{NOISE_P:g} in P, beam {BEAM:g}'), "
@@ -1483,7 +1539,7 @@ def main():
                freq=FREQ, res_arcmin=RES / utils.arcmin,
                noise_name=args.noise, noise_t=NOISE_T, noise_p=NOISE_P,
                beam=BEAM, lmax_pol=LMAX_POL, mask_apod=MASK_APOD,
-               mask_kind=args.mask, split_noise=SPLIT,
+               mask_kind=MASK_LABEL, split_noise=SPLIT,
                mask_file=args.mask_file if MASK is not None else "",
                cache_tag=CACHE_TAG, stat_names=STATS,
                requested=[args.n_meanfield, args.n_response, args.n_data],
