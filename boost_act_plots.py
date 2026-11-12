@@ -21,6 +21,10 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        L' <= --lens-lmax removed through the lensing
                        response (phi known: the most an external lensing map
                        could give), and the plain estimate for comparison
+    plots/*/speed.png  |v| = sqrt(vx^2 + vy^2 + vz^2) of each data sim, no
+                       direction assumed: mean +- 1 and 2 sd, the input, the
+                       bias nu = <|v|>/|v_in| and sd|v|/nu (speed_lens.png
+                       likewise, with the lensing leakage removed)
     plots/modulation/  modulation QE, solved without assuming the aberration;
                        unhardened likewise
     plots/joint/       one velocity for both effects; inverse_response is
@@ -777,6 +781,74 @@ def plot_amplitude_direction(S, path):
     plt.close(fig)
 
 
+def speed_stats(vel, v_in):
+    """|v| statistics over the data sims, vel (n, 3) in km/s, v_in the input
+    velocity: <|v|>, its sd, nu = <|v|> / |v_in| with its error
+    sd / (sqrt(n) |v_in|), and sd / nu."""
+    s = np.linalg.norm(vel, axis=1)
+    n, vin = len(s), np.linalg.norm(v_in)
+    sd = s.std(ddof=1)
+    nu = s.mean() / vin
+    return dict(speed=s, mean=s.mean(), sd=sd, nu=nu,
+                nu_err=sd / np.sqrt(n) / vin, sd_over_nu=sd / nu, n=n)
+
+
+def plot_speed(S, path):
+    """|v| of each data sim (no direction assumed), with its mean and 1 and
+    2 sd, and the input |v|.  The text box gives the upward bias
+    nu = <|v|> / |v_in| and sd|v| / nu (the amplitude error rescaled to a
+    debiased amplitude).  For a variant (S["variant"]), the plain
+    estimate's vel_dipole is drawn as a step histogram."""
+    vin = np.asarray(expected(S)[0])
+    base = str(S["name"]).split("_")[0]
+    col = COLOURS[base]
+    variant = S.get("variant")
+    st = speed_stats(np.asarray(S["vel"]), vin)
+    s, m, sd = st["speed"], st["mean"], st["sd"]
+    old = S.get("vel_dipole")
+    old_s = None if old is None else np.linalg.norm(old, axis=1)
+
+    every = s if old_s is None else np.r_[s, old_s]
+    lo, hi = every.min(), every.max()
+    pad = 0.08 * (hi - lo)
+    lo, hi = max(lo - pad, 0.0), hi + pad
+    lo = 0.0 if lo < 0.15 * hi else lo
+    bins = np.linspace(lo, hi, 31)
+
+    fig, ax = plt.subplots(figsize=(11, 4.8), layout="constrained")
+    ax.hist(s, bins=bins, color=col, alpha=0.4,
+            label=(f"{variant}: " if variant else "")
+            + f"$|\\hat v|$ = {m:.0f} $\\pm$ {sd:.0f} km/s (mean $\\pm$ sd)\n"
+            f"N: {st['n']} data, {int(S['n_mf'])} mf, "
+            f"{int(S['n_resp'])} response")
+    if old_s is not None:
+        ax.hist(old_s, bins=bins, histtype="step", color=INK, lw=1.2,
+                label=f"as before: {old_s.mean():.0f} $\\pm$ "
+                      f"{old_s.std(ddof=1):.0f} km/s")
+    for k in (-2, -1, 1, 2):
+        ax.axvline(m + k * sd, color=col, ls=":", lw=1)
+    ax.axvspan(m - sd, m + sd, color=col, alpha=0.08, lw=0)
+    ax.axvline(m, color=col, ls="--", lw=1.5)
+    _, _, word = expected(S)
+    ax.axvline(np.linalg.norm(vin), color=TRUTH, lw=2,
+               label=f"{word} $|v|$ = {np.linalg.norm(vin):.0f} km/s")
+    ax.set_xlim(lo, hi)
+    ax.set_xlabel(r"speed $|\hat v| = \sqrt{\hat v_x^2+\hat v_y^2"
+                  r"+\hat v_z^2}$ [km/s]")
+    ax.set_ylabel("sims")
+    ax.legend(fontsize=9, loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    text = (f"$\\nu = \\langle|\\hat v|\\rangle/|v|$ = {st['nu']:.3f} "
+            f"$\\pm$ {st['nu_err']:.3f}\n"
+            f"sd$|\\hat v|/\\nu$ = {st['sd_over_nu']:.1f} km/s")
+    ax.text(1.03, 0.0, text, transform=ax.transAxes, fontsize=9,
+            ha="left", va="bottom", linespacing=1.6,
+            bbox=dict(fc="white", ec="0.8"))
+    fig.suptitle(TITLES[base] + ": speed" + (f" ({variant})" if variant
+                                              else ""))
+    fig.savefig(path)
+    plt.close(fig)
+
+
 def real_basis(A, pl, pm, lmax=5):
     """Packed complex alm (..., npack) -> real-harmonic r_LM, 1 <= L <= lmax
     (at most what is packed), M = -L..L: r_L0 = a_L0, r_LM = sqrt2 (-1)^M
@@ -1406,7 +1478,8 @@ def write_report(summary, path):
 
 
 PER_ESTIMATOR = [plot_whisker, plot_planes, plot_response_matrix,
-                 plot_amplitude_direction, plot_alm_response, plot_leakage]
+                 plot_amplitude_direction, plot_speed, plot_alm_response,
+                 plot_leakage]
 
 
 def make_all(summary, outdir=None):
@@ -1426,7 +1499,8 @@ def make_all(summary, outdir=None):
             (os.path.join(outdir, "aberration"), "aberration", PER_ESTIMATOR),
             (os.path.join(outdir, "modulation"), "modulation", PER_ESTIMATOR),
             (os.path.join(outdir, "joint"), "joint",
-             [plot_whisker, plot_planes, plot_amplitude_direction]),
+             [plot_whisker, plot_planes, plot_amplitude_direction,
+              plot_speed]),
             (os.path.join(outdir, "joint"), "system", [plot_inverse_response])]
     for folder, name, fns in jobs:
         os.makedirs(folder, exist_ok=True)
@@ -1442,6 +1516,8 @@ def make_all(summary, outdir=None):
                              "φ known")
             save(plot_amplitude_direction, S,
                  os.path.join(outdir, name, "amplitude_direction_lens.png"))
+            S["vel_dipole"] = S0["vel"]
+            save(plot_speed, S, os.path.join(outdir, name, "speed_lens.png"))
     elif str(load(summary).get("cmb", "unlensed")) == "lensed":
         print(f"skipped */amplitude_direction_lens.png: {summary} has no "
               "lensing-removed estimates (it is from an older boost_act.py, "
