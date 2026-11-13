@@ -68,6 +68,25 @@ reused.  The response sims have no noise, so K is unchanged.  In the
 noise-dominated limit the scatter grows by up to sqrt2.  Summary and plots
 go to split_noise/ beside the standard ones.
 
+--mat-noise is the same cross estimator built literally from two legs: each
+mean-field and data sim's CMB S gets two new, independent noise maps, each
+sqrt2 times a draw from the noise model, X1 = S + N1 and X2 = S + N2, and the
+estimate is the cross q(X1, X2).  The quadratic estimator is bilinear and
+symmetric (masking and filtering are linear), so this is reconstructed exactly
+as q((X1 + X2)/2) - q((X1 - X2)/2) (labels 'mf mat+', 'mf mat-',
+'data mat+', 'data mat-'): two new reconstructions per mean-field and data
+sim, none reused.  (In distribution it is the same estimator as
+--split-noise, whose splits S + n +- d also have independent noise of twice
+the model's power, so the two should agree within their scatter.)  Summary
+and plots go to mat_noise/.
+
+--measured-phi (--cmb lensed) adds a second version of the lensing removal
+behind amplitude_direction_lens.png: the data sims' lensing modes at
+2 <= L' <= min(--lens-lmax, --lout) are taken from their own reconstruction
+instead of being known (amplitude_direction_lensrec.png), and the same with
+each L' Wiener-filtered by C_L' / (C_L' + N_L') (amplitude_direction_lenswf.png).
+See lens_removed_measured.
+
 --cmb lensed lenses every sim first: an unlensed CMB and a lensing potential
 phi, drawn from CAMB's C_L^phiphi (C_1 = 0: a lensing dipole would be a
 uniform deflection, the same as aberration), are combined with
@@ -311,6 +330,22 @@ parser.add_argument("--split-noise", action="store_true",
                          "reconstruction per mean-field and data sim; the "
                          "response sims (noise-free) and all cached sims are "
                          "reused.  Summary and plots go to split_noise/")
+parser.add_argument("--mat-noise", action="store_true",
+                    help="like --split-noise, but with the two legs made "
+                         "literally: each mean-field and data sim's CMB gets "
+                         "two new independent noise maps, each sqrt2 times "
+                         "a noise-model draw, and the estimate is their "
+                         "cross q(X1, X2), computed as q((X1 + X2)/2) - "
+                         "q((X1 - X2)/2).  Two new reconstructions per "
+                         "mean-field and data sim.  Summary and plots go to "
+                         "mat_noise/")
+parser.add_argument("--measured-phi", action="store_true",
+                    help="--cmb lensed: also remove the lensing leakage with "
+                         "each data sim's lensing modes 2 <= L' <= "
+                         "min(--lens-lmax, --lout) measured from its own "
+                         "reconstruction instead of known, plain and "
+                         "Wiener-filtered (amplitude_direction_lensrec.png, "
+                         "amplitude_direction_lenswf.png)")
 parser.add_argument("--cmb", default="unlensed", choices=["unlensed", "lensed"],
                     help="lensed: lens every sim with a phi drawn from "
                          "C_L^phiphi before the boost; cached under its own "
@@ -470,6 +505,19 @@ if SPLIT:                         # beside the standard summary, not over it
 SPLIT_LABELS = {"mf": "mf split", "data": "data split"}
 if SPLIT:
     DATA_LABELS.append(SPLIT_LABELS["data"])
+# --mat-noise: the two legs X1 = S + N1, X2 = S + N2 of each mean-field and
+# data sim, kept as their half-sum (S + (N1 + N2)/2) and half-difference
+# ((N1 - N2)/2); the half-difference has no CMB, so the data one is shared by
+# every --boost.
+MAT = args.mat_noise
+if MAT and SPLIT:
+    raise SystemExit("--split-noise and --mat-noise are two versions of the "
+                     "same estimator: give one")
+if MAT:
+    OUT = os.path.join(OUT, "mat_noise")
+MAT_LABELS = {"mf": ["mf mat+", "mf mat-"], "data": [f"{DATA} mat+", "data mat-"]}
+if MAT:
+    DATA_LABELS += MAT_LABELS["data"]
 
 X_NU = utils.h * FREQ / (utils.k * utils.T_cmb)
 B_NU = X_NU / np.tanh(X_NU / 2) - 1       # linearised-T modulation factor
@@ -795,6 +843,14 @@ def noise(seed):
                               seed=seed)
 
 
+def mat_legs(i, kind):
+    """--mat-noise: the noise of the two legs of mean-field (kind 'mf') or
+    data ('data') sim i, N1 and N2: independent, each sqrt2 times a draw from
+    the noise model (so each leg has twice the model's noise power)."""
+    s = (11_000_001 if kind == "mf" else 15_000_001) + 2 * i
+    return np.sqrt(2.0) * noise(s), np.sqrt(2.0) * noise(s + 2_000_000)
+
+
 def boost(tqu, direction, beta, aberrate=True, modulate=True):
     """pixell's Doppler boost.  The maps are dT/T_cmb, hence map_unit=T_cmb.
     With aberrate=False, boost_map modulates its input in place."""
@@ -852,7 +908,8 @@ STAGE = {"mf": "mf", DATA: "data", "lensphi": "data", BASE: "response",
          **{l: "response" for l in RESP_LABELS},
          **{l: "lensing response" for l in PHI_LABELS},
          **{l: "lensing by scale" for l in BAND_LABELS},
-         **{l: "split noise" for l in SPLIT_LABELS.values()}}
+         **{l: "split noise" for l in SPLIT_LABELS.values()},
+         **{l: "mat noise" for l in MAT_LABELS["mf"] + MAT_LABELS["data"]}}
 TODO = {}           # sims this run still has to make, per label (set in main)
 
 
@@ -866,6 +923,10 @@ def one_sim(label, i):
       data <effect>  the same CMB with that effect only + the same noise
       mf split, data split  noise only: the half-difference map d of mean-
                   field (data) sim i's two splits (--split-noise)
+      mf mat+, data mat+  (--mat-noise) the half-sum (X1 + X2)/2 of the two
+                  legs X1 = S + N1, X2 = S + N2 of mean-field (data) sim i:
+                  its CMB S (boosted, for data) plus (N1 + N2)/2
+      mf mat-, data mat-  the half-difference (X1 - X2)/2 = (N1 - N2)/2
       phi L M p/m  noise-free CMB lensed by +eps or -eps of one lensing
                   mode (lensing response, --cmb lensed)
       lensphi     not a reconstruction: the low-L lensing modes of data
@@ -885,6 +946,15 @@ def one_sim(label, i):
                                             2 if name == "lband2" else 1))
     if label == "mf":
         return reconstruct(cmb(1_000_000 + 2 * i) + noise(1_000_001 + 2 * i))
+    if label in MAT_LABELS["mf"] + MAT_LABELS["data"]:
+        kind = "mf" if label.startswith("mf") else "data"
+        n1, n2 = mat_legs(i, kind)
+        if label.endswith("-"):
+            return reconstruct(0.5 * (n1 - n2))
+        sky = (cmb(1_000_000 + 2 * i) if kind == "mf" else
+               boost(cmb(3_000_000 + 2 * i), BDIR, BETA,
+                     aberrate=ABERRATE, modulate=MODULATE))
+        return reconstruct(sky + 0.5 * (n1 + n2))
     if label == SPLIT_LABELS["mf"]:
         return reconstruct(noise(7_000_001 + 2 * i))
     if label == SPLIT_LABELS["data"]:
@@ -1335,6 +1405,96 @@ def lens_removed(mf, diff, dat, lens_V):
                  err=sd / np.sqrt(len(st)))
         out[f"{name}_lens"] = report(f"{name}, lensing L' <= {LPHI} removed", e)
         out[f"{name}_lens"]["phi_lmax"] = LPHI
+        out[f"{name}_lens"]["lens_variant"] = (f"lensing L′ ≤ {LPHI} removed, "
+                                               "φ known")
+    return out
+
+
+def packed_to_real(a, Ls):
+    """Packed alm (..., npack) -> real-basis coefficients (..., mode) of the
+    multipoles Ls, M = -L..L, in the basis and order of PHI_MODES."""
+    out = []
+    for L in Ls:
+        for M in range(-L, L + 1):
+            x = a[..., np.flatnonzero((PACK_L == L) & (PACK_M == abs(M)))[0]]
+            out.append(x.real if M == 0 else np.sqrt(2) * (-1) ** abs(M)
+                       * (x.real if M > 0 else -x.imag))
+    return np.stack(out, axis=-1)
+
+
+def lens_removed_measured(mf, diff, dat, sy):
+    """lens_removed with phi measured instead of known (--measured-phi): the
+    lensing modes 2 <= L' <= Lm = min(LPHI, LOUT) of each data sim are taken
+    from its own lensing reconstruction (the T+P estimator that gives the
+    aberration dipole at L = 1).  L' = 1 is left out: there the
+    reconstruction is the aberration signal itself.
+      psi      the reconstruction's real-basis modes at those L', less their
+               mean over the mean-field sims
+      phi-hat  psi R^-1: R (lens_R_ab, from the lensing-response sims) is
+               how each true mode shows up in psi; a mask mixes modes and
+               scales them down, so psi alone is not phi
+      u - phi-hat F V   V the velocity each mode puts into the estimate
+               (lens_V, as in lens_removed); F = 1 ('lensrec') or, per L',
+               the Wiener factor f = C_L' / var(phi-hat) over the
+               mean-field sims, = C_L' / (C_L' + N_L') ('lenswf')
+    The boost itself leaks into psi at L' >= 2 (B, from the response sims),
+    so a physical boost u gives E[correction] = u B R^-1 F V =: u M; the
+    result is divided by (I - M) to keep it unbiased.  Phi-hat also carries
+    the reconstruction noise N_L', which the plain version adds to the
+    estimate in full; the Wiener-filtered one only removes the part of
+    each L' the reconstruction can tell from noise.  The null test is the
+    uncorrected estimate's."""
+    Lm = min(LPHI, LOUT)
+    if Lm < 2:
+        print("measured phi: needs --lens-lmax and --lout >= 2")
+        return {}
+    Ls = list(range(2, Lm + 1))
+    sel = np.array([2 <= L <= Lm for L, M in PHI_MODES])
+    L_of = np.array([L for L, M in PHI_MODES])[sel]
+    psi = lambda x: packed_to_real(-est_alm(x, ABER_CASE), Ls)   # phi = -u.n
+    p_mf, p_dat = psi(mf), psi(dat)
+    p0 = p_mf.mean(axis=0)
+    R = packed_to_real(np.asarray(sy["lens_R_ab"])[sel], Ls)    # (in, out)
+    Rinv = np.linalg.inv(R)
+    x_mf, x_dat = (p_mf - p0) @ Rinv, (p_dat - p0) @ Rinv
+    D = psi(diff) / BETA                     # (effect, axis, sim, mode)
+    B = D.mean(axis=2)                       # psi per unit u, per axis
+    B_phys, B_run = B[0] + B[1], ABERRATE * B[0] + MODULATE * B[1]
+    var = x_mf.var(axis=0, ddof=1)
+    f_L = {L: min(1.0, CLPP[L] / var[L_of == L].mean()) for L in Ls}
+    V = np.asarray(sy["lens_V"])[:, sel]     # (estimate, mode, 3)
+    est = solve((ABER_CASE, "MOD"), mf, diff, dat)[5]
+    print(f"\nwith each data sim's lensing modes 2 <= L' <= {Lm} measured "
+          "from its own reconstruction")
+    print(f"   lensing response R at those modes: diagonal mean "
+          f"{np.diag(R).mean():.3f}, condition number {np.linalg.cond(R):.1f}")
+    print("   reconstruction noise vs signal per mode, N_L'/C_L' = "
+          + ", ".join(f"{L}: {1 / f - 1:.1f}" if f > 0 else f"{L}: inf"
+                      for L, f in f_L.items()))
+    out = {}
+    for tag, F in (("lensrec", np.ones(len(L_of))),
+                   ("lenswf", np.array([f_L[L] for L in L_of]))):
+        for k, name in enumerate(("aberration", "modulation", "joint")):
+            W = (Rinv * F) @ V[k]            # phi-hat from psi, then velocity
+            M = B_phys @ W                   # (3, 3): bias of a physical boost
+            fix = np.linalg.inv(np.eye(3) - M)
+            e = dict(est[name])
+            u = (e["u"] - x_dat * F @ V[k]) @ fix
+            e["u_expect"] = (e["u_expect"] - U_TRUE @ B_run @ W) @ fix
+            st = stats(u)
+            sd = st.std(axis=0, ddof=1)
+            e.update(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
+                     err=sd / np.sqrt(len(st)))
+            what = ("phi measured" if tag == "lensrec"
+                    else "phi measured, Wiener-filtered")
+            out[f"{name}_{tag}"] = report(
+                f"{name}, lensing 2 <= L' <= {Lm} removed, {what} "
+                f"(boost leakage |M| = {np.linalg.norm(M, 2):.3f})", e)
+            out[f"{name}_{tag}"].update(
+                phi_lmin=2, phi_lmax=Lm,
+                lens_variant=f"lensing 2 ≤ L′ ≤ {Lm} removed, "
+                             + what.replace("phi", "φ"),
+                wiener=np.array([f_L[L] for L in Ls]))
     return out
 
 
@@ -1442,7 +1602,9 @@ def main():
               **({"lensphi": args.n_data} if LENSED else {}),
               **{l: n_band for l in BAND_LABELS},
               **({SPLIT_LABELS["mf"]: args.n_meanfield,
-                  SPLIT_LABELS["data"]: args.n_data} if SPLIT else {})}
+                  SPLIT_LABELS["data"]: args.n_data} if SPLIT else {}),
+              **({l: args.n_meanfield for l in MAT_LABELS["mf"]} if MAT else {}),
+              **({l: args.n_data for l in MAT_LABELS["data"]} if MAT else {})}
     TODO.update({l: sum(not os.path.exists(cache_path(l, i))
                         for i in range(args.shard, n, args.nshards))
                  for l, n in counts.items()})
@@ -1471,6 +1633,13 @@ def main():
                   "each mean-field and data sim")
             run(SPLIT_LABELS["mf"], args.n_meanfield)
             run(SPLIT_LABELS["data"], args.n_data)
+        if MAT:
+            print("\n[C2] mat noise: the half-sum and half-difference of the "
+                  "two legs of each mean-field and data sim")
+            for label in MAT_LABELS["mf"]:
+                run(label, args.n_meanfield)
+            for label in MAT_LABELS["data"]:
+                run(label, args.n_data)
         if n_lens:
             print("\n[D] lensing response")
             for label in PHI_LABELS:
@@ -1499,6 +1668,14 @@ def main():
             dat = dat[0] - dat[1]
         else:
             mf, mf_noise, dat = pair[0], pair[1], dat[0][:0]
+    elif MAT:
+        # Cross estimate of the two legs: q((X1 + X2)/2) - q((X1 - X2)/2).
+        pair = collect(MAT_LABELS["mf"], args.n_meanfield)
+        if len(pair[0]):
+            mf, mf_noise = pair[0] - pair[1], pair[1]
+            dat = dat[1] - dat[2]
+        else:
+            mf, mf_noise, dat = pair[0], pair[1], dat[0][:0]
     else:
         dat = dat[0]
     counts = (len(mf), diff.shape[2], len(dat))
@@ -1511,7 +1688,7 @@ def main():
     if counts != (args.n_meanfield, args.n_response, args.n_data):
         print("partial: the report and figures cover the sims cached so far")
     results = analyse(mf, diff, dat)
-    if SPLIT:
+    if SPLIT or MAT:
         # How much of the standard mean field the split estimator drops: the
         # mean-field dipole of the noise-only maps (the instrument-noise
         # mean field), and that of the standard estimate, over |u_in|.
@@ -1522,12 +1699,13 @@ def main():
                              / np.linalg.norm(U_TRUE) for i in (0, 3)])
         results["system"].update(mf_noise_over_u=mf_dipole(mf_noise),
                                  mf_std_over_u=mf_dipole(mf_std))
-        print("   split noise: |mean field| / |u_in| of the standard "
+        print(f"   {'split' if SPLIT else 'mat'} noise: |mean field| / |u_in| of the standard "
               f"estimate {ABER_CASE} {results['system']['mf_std_over_u'][0]:.2f}, "
               f"MOD {results['system']['mf_std_over_u'][1]:.2f}; its noise-only "
               f"part {results['system']['mf_noise_over_u'][0]:.2f}, "
-              f"{results['system']['mf_noise_over_u'][1]:.2f}; the split "
-              "estimate's (above) has no noise part")
+              f"{results['system']['mf_noise_over_u'][1]:.2f}; the "
+              f"{'split' if SPLIT else 'mat'}-noise estimate's (above) has "
+              "no noise part")
     if n_lens:
         phi = collect(PHI_LABELS, n_lens)          # (70, sim, 4, npack)
         if phi.shape[1] >= 2:
@@ -1537,6 +1715,9 @@ def main():
                 mf, diff, dat))
             results.update(lens_removed(mf, diff, dat,
                                         results["system"]["lens_V"]))
+            if args.measured_phi:
+                results.update(lens_removed_measured(mf, diff, dat,
+                                                     results["system"]))
         else:
             print("lensing response: too few sims cached yet")
     if n_band:
@@ -1548,7 +1729,7 @@ def main():
                freq=FREQ, res_arcmin=RES / utils.arcmin,
                noise_name=args.noise, noise_t=NOISE_T, noise_p=NOISE_P,
                beam=BEAM, lmax_pol=LMAX_POL, mask_apod=MASK_APOD,
-               mask_kind=MASK_LABEL, split_noise=SPLIT,
+               mask_kind=MASK_LABEL, split_noise=SPLIT, mat_noise=MAT,
                mask_file=args.mask_file if MASK is not None else "",
                cache_tag=CACHE_TAG, stat_names=STATS,
                requested=[args.n_meanfield, args.n_response, args.n_data],

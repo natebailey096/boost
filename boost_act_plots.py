@@ -22,7 +22,10 @@ matplotlib only, so they can be redrawn without rerunning anything).
                        the leakage of the data sims' own lensing modes
                        L' <= --lens-lmax removed through the lensing
                        response (phi known: the most an external lensing map
-                       could give), and the plain estimate for comparison
+                       could give), and the plain estimate for comparison;
+                       _lensrec and _lenswf likewise with phi measured from
+                       the sim's own reconstruction (--measured-phi), plain
+                       and Wiener-filtered
     plots/*/speed.png  |v| = sqrt(vx^2 + vy^2 + vz^2) of each data sim, no
                        direction assumed: mean +- 1 and 2 sd, the input, the
                        bias nu = <|v|>/|v_in| and sd|v|/nu (speed_lens.png
@@ -123,6 +126,23 @@ def pm(value, err=None):
 NO_JK = ("errors on the inverses need the jackknife copies of K, which this "
          "summary.npz (from an older boost_act.py) lacks: rerun boost_act.py "
          "with the same options; it reuses the cached sims and makes none")
+
+
+LENS_TAGS = ("_lens", "_lensrec", "_lenswf")   # lensing-removal variants
+
+
+def noise_mode(S):
+    """' (split noise)' or ' (mat noise)' for the cross-estimator runs."""
+    if bool(S.get("split_noise", False)):
+        return " (split noise)"
+    return " (mat noise)" if bool(S.get("mat_noise", False)) else ""
+
+
+def lens_text(S):
+    """What one lensing-removed estimate did, for titles."""
+    if "lens_variant" in S:
+        return str(S["lens_variant"])
+    return f"lensing L′ ≤ {int(S['phi_lmax'])} removed, φ known"
 
 
 def expected(S):
@@ -423,7 +443,7 @@ def _plot_cov(S, path, M, labels, title, corr=False):
     ax.grid(False)
     fig.colorbar(im, ax=ax, fraction=0.046,
                  label="correlation" if corr else "(km/s)$^2$")
-    split = " (split noise)" if bool(S.get("split_noise", False)) else ""
+    split = noise_mode(S)
     ax.set_title(f"{title} {'correlation' if corr else 'covariance'}{split}, "
                  f"{int(S['n_cov'])} data sims", fontsize=11)
     fig.savefig(path)
@@ -458,7 +478,7 @@ def plot_correlation_unhardened(S, path):
     _plot_cov(S, path, S["cov_raw"], RAW_LABELS, "Unhardened", corr=True)
 
 
-def lens_covariances(summary):
+def lens_covariances(summary, tag="_lens"):
     """For --cmb lensed runs with the lensing leakage removed: the system
     entries plus cov_hard and cov_raw of the lensing-removed estimates.
     The summary keeps only their per-sim velocities, so the 6x6 covariance
@@ -466,15 +486,15 @@ def lens_covariances(summary):
     hardening is K C K^T (y = K u; for the plain estimates both reproduce
     the stored matrices exactly).  None if the summary has no such
     estimates."""
-    if "aberration_lens.vel" not in np.load(summary).files:
+    if f"aberration{tag}.vel" not in np.load(summary).files:
         return None
     sy = load(summary, "system")
-    lens = [load(summary, n + "_lens") for n in ("aberration", "modulation")]
+    lens = [load(summary, n + tag) for n in ("aberration", "modulation")]
     C = np.cov(np.hstack([e["vel"] for e in lens]), rowvar=False)
     K = np.asarray(sy["K"])
     return {**sy, "cov_hard": C, "cov_raw": K @ C @ K.T,
             "n_cov": len(lens[0]["vel"]),
-            "variant": f"lensing L′ ≤ {int(lens[0]['phi_lmax'])} removed"}
+            "variant": lens_text(lens[0])}
 
 
 def plot_covariance_lens(S, path):
@@ -1219,6 +1239,10 @@ def write_report(summary, path):
         w("| mean field and data | two-split cross estimate q(X) − q(d), "
           "d the noise-only half-difference map (`--split-noise`): no "
           "instrument-noise mean field |")
+    if bool(S.get("mat_noise", False)):
+        w("| mean field and data | cross estimate q(X1, X2) of two legs "
+          "X1 = S + N1, X2 = S + N2, each N an independent draw √2 times the "
+          "noise model (`--mat-noise`): no instrument-noise mean field |")
     w(f"| input boost | β = {float(S['beta']):.4e} = "
       f"{np.linalg.norm(v_in):.1f} km/s toward galactic ℓ = {l_in:.2f}°, "
       f"b = {b_in:+.2f}° (ra {ra_in:.2f}°, dec {dec_in:+.2f}°) |")
@@ -1374,6 +1398,32 @@ def write_report(summary, path):
           "|\n|---|---|---|---|---|---|---|")
         for n in TITLES:
             e = load(summary, n + "_lens")
+            a, er, sd = e["stat_mean"][0], e["stat_err"][0], e["stat_sd"][0]
+            w(f"| {n} | {expected(e)[1]:+.4f} | {a:+.4f} | {er:.4f} | "
+              f"{sd:.4f} | {E[n]['stat_sd'][0]:.4f} | "
+              f"{np.sqrt(np.mean(E[n]['stat_sd'][1:4] ** 2)):.0f} → "
+              f"{np.sqrt(np.mean(e['stat_sd'][1:4] ** 2)):.0f} |")
+    for tag in ("_lensrec", "_lenswf"):
+        if f"aberration{tag}.amp" not in np.load(summary).files:
+            continue
+        e0 = load(summary, "aberration" + tag)
+        w(f"\n## {lens_text(e0)[0].upper() + lens_text(e0)[1:]} "
+          f"(`*/amplitude_direction{tag}.png`)\n")
+        w("As above, but each data sim's φ_L′M′ at 2 ≤ L′ ≤ "
+          f"{int(e0['phi_lmax'])} comes from its own reconstruction, "
+          "deconvolved by the lensing response R"
+          + (", each L′ scaled by the Wiener factor C_L′/(C_L′ + N_L′) "
+             "measured on the mean-field sims ("
+             + ", ".join(f"L′ = {L}: {f:.2f}" for L, f in
+                         zip(range(2, int(e0["phi_lmax"]) + 1), e0["wiener"]))
+             + ")" if tag == "_lenswf" else "")
+          + ".  The boost's own leakage into those modes is divided out, so "
+          "the expected values are unchanged.\n")
+        w("| estimate | A expected | A mean | error on the mean | sd (one sim) | "
+          "sd, as before | v sd per component, as before → removed [km/s] "
+          "|\n|---|---|---|---|---|---|---|")
+        for n in TITLES:
+            e = load(summary, n + tag)
             a, er, sd = e["stat_mean"][0], e["stat_err"][0], e["stat_sd"][0]
             w(f"| {n} | {expected(e)[1]:+.4f} | {a:+.4f} | {er:.4f} | "
               f"{sd:.4f} | {E[n]['stat_sd'][0]:.4f} | "
@@ -1583,34 +1633,32 @@ def make_all(summary, outdir=None):
         S = load(summary, name)
         for fn in fns:
             save(fn, S, os.path.join(folder, fn.__name__[5:] + ".png"))
-    if "aberration_lens.amp" in np.load(summary).files:
+    files = np.load(summary).files
+    for tag in [t for t in LENS_TAGS if f"aberration{t}.amp" in files]:
         for name in TITLES:
-            S = load(summary, name + "_lens")
+            S = load(summary, name + tag)
             S0 = load(summary, name)
             S.update(amp_dipole=S0["amp"], dir_dipole=S0["dir"],
-                     variant=f"lensing L′ ≤ {int(S['phi_lmax'])} removed, "
-                             "φ known")
+                     variant=lens_text(S))
             save(plot_amplitude_direction, S,
-                 os.path.join(outdir, name, "amplitude_direction_lens.png"))
+                 os.path.join(outdir, name, f"amplitude_direction{tag}.png"))
             S["vel_dipole"] = S0["vel"]
-            save(plot_speed, S, os.path.join(outdir, name, "speed_lens.png"))
-        S3 = [load(summary, n + "_lens") for n in TITLES]
+            save(plot_speed, S, os.path.join(outdir, name, f"speed{tag}.png"))
+        S3 = [load(summary, n + tag) for n in TITLES]
         for S in S3:
-            S["variant"] = (f"lensing L′ ≤ {int(S['phi_lmax'])} removed, "
-                            "φ known")
-        save(plot_comparison, S3, os.path.join(outdir, "comparison_lens.png"))
+            S["variant"] = lens_text(S)
+        save(plot_comparison, S3, os.path.join(outdir, f"comparison{tag}.png"))
         save(plot_comparison_scatter, S3,
-             os.path.join(outdir, "comparison_scatter_lens.png"))
-        SL = lens_covariances(summary)
-        save(plot_covariance_lens, SL,
-             os.path.join(outdir, "covariance_lens.png"))
-        save(plot_covariance_unhardened_lens, SL,
-             os.path.join(outdir, "covariance_unhardened_lens.png"))
-        save(plot_correlation_lens, SL,
-             os.path.join(outdir, "correlation_lens.png"))
-        save(plot_correlation_unhardened_lens, SL,
-             os.path.join(outdir, "correlation_unhardened_lens.png"))
-    elif str(load(summary).get("cmb", "unlensed")) == "lensed":
+             os.path.join(outdir, f"comparison_scatter{tag}.png"))
+        SL = lens_covariances(summary, tag)
+        for fn, stem in ((plot_covariance_lens, "covariance"),
+                         (plot_covariance_unhardened_lens, "covariance_unhardened"),
+                         (plot_correlation_lens, "correlation"),
+                         (plot_correlation_unhardened_lens,
+                          "correlation_unhardened")):
+            save(fn, SL, os.path.join(outdir, f"{stem}{tag}.png"))
+    if ("aberration_lens.amp" not in files
+            and str(load(summary).get("cmb", "unlensed")) == "lensed"):
         print(f"skipped */amplitude_direction_lens.png: {summary} has no "
               "lensing-removed estimates (it is from an older boost_act.py, "
               "or the lensing-response sims are missing); rerun the current "
