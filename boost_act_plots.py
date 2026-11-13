@@ -5,8 +5,10 @@ matplotlib only, so they can be redrawn without rerunning anything).
     python boost_act_plots.py cache_boost/<mask>_<noise>/summary.npz
 
     plots/             coverage, noise, response_6x6 (K and K^-1),
-                       comparison (A from the three estimates, and
-                       aberration against modulation)
+                       comparison (A from the three estimates),
+                       comparison_scatter (aberration against modulation),
+                       covariance and correlation (hardened) and their
+                       _unhardened versions (estimator dipoles y)
     plots/aberration/  lensing QE, solved without assuming the modulation;
                        unhardened shows the bias of R^-1 alone;
                        meanfield_map_mean and meanfield_map_one_sim show
@@ -399,50 +401,105 @@ def plot_response_6x6(S, path):
     plt.close(fig)
 
 
-def _plot_cov(S, path, M, labels, title, note):
-    """One 6x6 covariance shown as its correlation matrix,
-    rho_ij = C_ij / (sd_i sd_j), between -1 and 1.  The sds and the
-    covariance itself are in report.md."""
-    sd = np.sqrt(np.diag(M))
-    R = M / np.outer(sd, sd)
+def _plot_cov(S, path, M, labels, title, corr=False):
+    """One 6x6 matrix: the covariance [(km/s)^2], or with corr=True its
+    correlation rho_ij = C_ij / (sd_i sd_j)."""
+    M = np.asarray(M, float)
+    if corr:
+        sd = np.sqrt(np.diag(M))
+        M = M / np.outer(sd, sd)
+    lim = 1.0 if corr else np.abs(M).max()
+    fmt = "{:+.2f}" if corr else "{:+.0f}"
     fig, ax = plt.subplots(figsize=(8.2, 7.2), layout="constrained")
-    im = ax.imshow(R, cmap="RdBu_r", vmin=-1, vmax=1)
+    im = ax.imshow(M, cmap="RdBu_r", vmin=-lim, vmax=lim)
     for i in range(6):
         for j in range(6):
-            ax.text(j, i, f"{R[i, j]:+.2f}", ha="center", va="center",
-                    fontsize=9, color="w" if abs(R[i, j]) > 0.75 else "k")
+            ax.text(j, i, fmt.format(M[i, j]), ha="center", va="center",
+                    fontsize=9, color="w" if abs(M[i, j]) > 0.75 * lim else "k")
     ax.axhline(2.5, color="k", lw=1.5)
     ax.axvline(2.5, color="k", lw=1.5)
     ax.set_yticks(range(6), labels, fontsize=9)
     ax.set_xticks(range(6), labels, fontsize=9)
     ax.grid(False)
-    fig.colorbar(im, ax=ax, fraction=0.046, label="correlation coefficient")
-    split = " (split-noise estimator)" if bool(S.get("split_noise", False)) else ""
-    ax.set_title(title + split, fontsize=11)
-    fig.supxlabel(note, fontsize=8.5)
+    fig.colorbar(im, ax=ax, fraction=0.046,
+                 label="correlation" if corr else "(km/s)$^2$")
+    split = " (split noise)" if bool(S.get("split_noise", False)) else ""
+    ax.set_title(f"{title} {'correlation' if corr else 'covariance'}{split}, "
+                 f"{int(S['n_cov'])} data sims", fontsize=11)
     fig.savefig(path)
     plt.close(fig)
 
 
+HARD_LABELS = ["$u_{ab}$ x", "$u_{ab}$ y", "$u_{ab}$ z",
+               "$u_{mod}$ x", "$u_{mod}$ y", "$u_{mod}$ z"]
+RAW_LABELS = ["aber QE x", "aber QE y", "aber QE z",
+              "mod QE x", "mod QE y", "mod QE z"]
+
+
 def plot_covariance(S, path):
-    """Covariance of the six measured components after hardening, the
-    separate estimates (u_ab, u_mod) = K^-1 (y - mean field), over the data
-    sims."""
-    _plot_cov(S, path, np.asarray(S["cov_hard"]),
-              ["$u_{ab}$ x", "$u_{ab}$ y", "$u_{ab}$ z",
-               "$u_{mod}$ x", "$u_{mod}$ y", "$u_{mod}$ z"],
-              r"correlation of the separate estimates $K^{-1}(y - \bar{y}_{\rm MF})$",
-              f"{int(S['n_cov'])} data sims")
+    """Hardened: the separate estimates (u_ab, u_mod) = K^-1 (y - mean
+    field), over the data sims."""
+    _plot_cov(S, path, S["cov_hard"], HARD_LABELS, "Hardened")
+
+
+def plot_correlation(S, path):
+    """plot_covariance, as a correlation matrix."""
+    _plot_cov(S, path, S["cov_hard"], HARD_LABELS, "Hardened", corr=True)
 
 
 def plot_covariance_unhardened(S, path):
-    """Covariance of the six estimator dipoles y before hardening (each
-    estimator's full-sky normalised L = 1 vector), over the data sims."""
-    _plot_cov(S, path, np.asarray(S["cov_raw"]),
-              ["aber QE x", "aber QE y", "aber QE z",
-               "mod QE x", "mod QE y", "mod QE z"],
-              "correlation of the estimator dipoles $y$ before hardening",
-              f"{int(S['n_cov'])} data sims")
+    """Unhardened: the six estimator dipoles y (each estimator's full-sky
+    normalised L = 1 vector), over the data sims."""
+    _plot_cov(S, path, S["cov_raw"], RAW_LABELS, "Unhardened")
+
+
+def plot_correlation_unhardened(S, path):
+    """plot_covariance_unhardened, as a correlation matrix."""
+    _plot_cov(S, path, S["cov_raw"], RAW_LABELS, "Unhardened", corr=True)
+
+
+def lens_covariances(summary):
+    """For --cmb lensed runs with the lensing leakage removed: the system
+    entries plus cov_hard and cov_raw of the lensing-removed estimates.
+    The summary keeps only their per-sim velocities, so the 6x6 covariance
+    of (u_ab, u_mod) is taken over the data sims, and the one before
+    hardening is K C K^T (y = K u; for the plain estimates both reproduce
+    the stored matrices exactly).  None if the summary has no such
+    estimates."""
+    if "aberration_lens.vel" not in np.load(summary).files:
+        return None
+    sy = load(summary, "system")
+    lens = [load(summary, n + "_lens") for n in ("aberration", "modulation")]
+    C = np.cov(np.hstack([e["vel"] for e in lens]), rowvar=False)
+    K = np.asarray(sy["K"])
+    return {**sy, "cov_hard": C, "cov_raw": K @ C @ K.T,
+            "n_cov": len(lens[0]["vel"]),
+            "variant": f"lensing L′ ≤ {int(lens[0]['phi_lmax'])} removed"}
+
+
+def plot_covariance_lens(S, path):
+    """plot_covariance for the lensing-removed estimates (lens_covariances)."""
+    _plot_cov(S, path, S["cov_hard"], HARD_LABELS,
+              f"Hardened, {S['variant']}")
+
+
+def plot_correlation_lens(S, path):
+    """plot_covariance_lens, as a correlation matrix."""
+    _plot_cov(S, path, S["cov_hard"], HARD_LABELS, f"Hardened, {S['variant']}",
+              corr=True)
+
+
+def plot_covariance_unhardened_lens(S, path):
+    """plot_covariance_unhardened for the lensing-removed estimates: their
+    covariance mapped back to the estimator dipoles, K C K^T."""
+    _plot_cov(S, path, S["cov_raw"], RAW_LABELS,
+              f"Unhardened, {S['variant']}")
+
+
+def plot_correlation_unhardened_lens(S, path):
+    """plot_covariance_unhardened_lens, as a correlation matrix."""
+    _plot_cov(S, path, S["cov_raw"], RAW_LABELS, f"Unhardened, {S['variant']}",
+              corr=True)
 
 
 VPAR = (r"velocity along the input direction, "
@@ -450,36 +507,52 @@ VPAR = (r"velocity along the input direction, "
 
 
 def plot_comparison(S3, path):
-    """A from the three estimates, and aberration against modulation sim by
-    sim: the more correlated they are, the less combining them gains."""
-    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.6),
-                                   layout="constrained")
+    """v_parallel = A |v_in| from the three estimates, as histograms.  The
+    estimates may be variants (names like aberration_lens, with
+    S["variant"] saying what was done); the variant is then the title."""
+    fig, ax0 = plt.subplots(figsize=(7, 4.6), layout="constrained")
+    base = [str(S["name"]).split("_")[0] for S in S3]
     vin = np.linalg.norm(S3[0]["v_true"])       # A x |v_in| = v . v_in-hat
     allamp = np.concatenate([S["amp"] for S in S3]) * vin
     bins = np.linspace(*np.percentile(allamp, [0.5, 99.5]), 40)
-    for S in S3:
+    for S, b in zip(S3, base):
         a = S["amp"] * vin
         ax0.hist(a, bins=bins, histtype="step", lw=1.8,
-                 color=COLOURS[S["name"]],
-                 label=f"{TITLES[S['name']]}: {a.mean():+.0f} $\\pm$ "
+                 color=COLOURS[b],
+                 label=f"{TITLES[b]}: {a.mean():+.0f} $\\pm$ "
                        f"{a.std(ddof=1):.0f} km/s (sd)")
     exp = [expected(S) for S in S3]
     if all(word == "input" for _, _, word in exp):
         ax0.axvline(vin, color=TRUTH, lw=2, label=f"input: {vin:.0f} km/s")
     else:
-        for S, (_, A_e, _) in zip(S3, exp):
-            ax0.axvline(A_e * vin, color=COLOURS[S["name"]], ls="--", lw=1.8,
-                        label=f"expected, {TITLES[S['name']]}: "
+        for b, (_, A_e, _) in zip(base, exp):
+            ax0.axvline(A_e * vin, color=COLOURS[b], ls="--", lw=1.8,
+                        label=f"expected, {TITLES[b]}: "
                               f"{A_e * vin:.0f} km/s")
     ax0.set_xlabel(VPAR)
     ax0.set_ylabel("sims")
     ax0.legend(fontsize=9, frameon=True, framealpha=0.9, edgecolor="none")
+    if S3[0].get("variant"):
+        ax0.set_title(str(S3[0]["variant"]))
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_comparison_scatter(S3, path):
+    """Aberration against modulation v_parallel, sim by sim: the more
+    correlated they are, the less combining them gains."""
+    fig, ax1 = plt.subplots(figsize=(6, 5), layout="constrained")
+    vin = np.linalg.norm(S3[0]["v_true"])
+    exp = [expected(S) for S in S3]
     a, m = S3[0]["amp"] * vin, S3[1]["amp"] * vin
     ax1.scatter(a, m, s=8, color=INK, alpha=0.4, lw=0)
     ax1.plot(exp[0][1] * vin, exp[1][1] * vin, "*", ms=16, color=TRUTH)
     ax1.set_xlabel(r"aberration $v_\parallel$ [km/s]")
     ax1.set_ylabel(r"modulation $v_\parallel$ [km/s]")
-    ax1.set_title(f"correlation {np.corrcoef(a, m)[0, 1]:+.2f}")
+    title = f"correlation {np.corrcoef(a, m)[0, 1]:+.2f}"
+    if S3[0].get("variant"):
+        title = f"{S3[0]['variant']}: {title}"
+    ax1.set_title(title)
     fig.savefig(path)
     plt.close(fig)
 
@@ -1521,6 +1594,22 @@ def make_all(summary, outdir=None):
                  os.path.join(outdir, name, "amplitude_direction_lens.png"))
             S["vel_dipole"] = S0["vel"]
             save(plot_speed, S, os.path.join(outdir, name, "speed_lens.png"))
+        S3 = [load(summary, n + "_lens") for n in TITLES]
+        for S in S3:
+            S["variant"] = (f"lensing L′ ≤ {int(S['phi_lmax'])} removed, "
+                            "φ known")
+        save(plot_comparison, S3, os.path.join(outdir, "comparison_lens.png"))
+        save(plot_comparison_scatter, S3,
+             os.path.join(outdir, "comparison_scatter_lens.png"))
+        SL = lens_covariances(summary)
+        save(plot_covariance_lens, SL,
+             os.path.join(outdir, "covariance_lens.png"))
+        save(plot_covariance_unhardened_lens, SL,
+             os.path.join(outdir, "covariance_unhardened_lens.png"))
+        save(plot_correlation_lens, SL,
+             os.path.join(outdir, "correlation_lens.png"))
+        save(plot_correlation_unhardened_lens, SL,
+             os.path.join(outdir, "correlation_unhardened_lens.png"))
     elif str(load(summary).get("cmb", "unlensed")) == "lensed":
         print(f"skipped */amplitude_direction_lens.png: {summary} has no "
               "lensing-removed estimates (it is from an older boost_act.py, "
@@ -1547,6 +1636,9 @@ def make_all(summary, outdir=None):
         save(plot_covariance, sy, os.path.join(outdir, "covariance.png"))
         save(plot_covariance_unhardened, sy,
              os.path.join(outdir, "covariance_unhardened.png"))
+        save(plot_correlation, sy, os.path.join(outdir, "correlation.png"))
+        save(plot_correlation_unhardened, sy,
+             os.path.join(outdir, "correlation_unhardened.png"))
     if "lens_V" in sy:                         # --cmb lensed runs only
         for name in ("aberration", "modulation"):
             save(plot_lensing_response, {**sy, "name": name},
@@ -1556,8 +1648,10 @@ def make_all(summary, outdir=None):
              os.path.join(outdir, "lensing_dipole.png"))
     if "band_coh_var" in sy:                   # --n-lens-bands
         save(plot_lensing_bands, sy, os.path.join(outdir, "lensing_bands.png"))
-    save(plot_comparison, [load(summary, n) for n in TITLES],
-         os.path.join(outdir, "comparison.png"))
+    S3 = [load(summary, n) for n in TITLES]
+    save(plot_comparison, S3, os.path.join(outdir, "comparison.png"))
+    save(plot_comparison_scatter, S3,
+         os.path.join(outdir, "comparison_scatter.png"))
     write_report(summary, os.path.join(outdir, "report.md"))
 
 
