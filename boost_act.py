@@ -27,9 +27,20 @@ different response and options for the mask and the noise level.
                            prepare theirs (github.com/pdsferreira/cmb-aber-dopp,
                            masksymm): kept only where the antipode is kept too,
                            smoothed by a 10' FWHM Gaussian, clipped to [0, 1].
-    --noise  f150 | act    white noise in T of 24 (f150) or 14 (act) uK-arcmin,
-                           sqrt2 x that in P.  Beam, 1/f knees and slopes are
-                           the same for both; 600 <= l <= 3000.
+    --noise  act           the DR6 effective noise (ACT DR6 power spectra,
+                           2503.14452, Fig. 3): 14 uK-arcmin in T, sqrt2 x
+                           that in P, 1.42' beam, 1/f knees 3000 (T) and 475
+                           (P), slopes -3 and -4.5; 600 <= l <= 3000, 150 GHz.
+    --noise  f150 | f090   the PA5 f150 and PA5 f090 array-bands of the same
+                           figure, fitted with the noise crossing the lensed
+                           CMB spectrum where the data do.  f150: 27
+                           uK-arcmin in T, 1.42' beam, knees 3150 and 375,
+                           slopes -3.2 and -4.5, 150 GHz.  f090: 25 uK-arcmin,
+                           2.0' beam, knee 1850 in T and none in P, slopes
+                           -3.5 and -4.5, 97 GHz.  P is sqrt2 x T for both;
+                           600 <= l <= 3000.  f150 sims are cached under
+                           f150dr6 (those made with the old f150 preset, 24
+                           uK-arcmin and the act knees, under f150, stay).
     --noise  planck        33 uK-arcmin in T, 70 in P (the Planck 2018 143 GHz
                            noise, Planck 2018 I Table 4), 5' beam, white;
                            200 <= l <= 1800, E and B to 1150 (Ferreira &
@@ -231,9 +242,16 @@ MASKS = {"dr6": dict(url=MASK_URL, coord="equ", apod=0.0, tag_apod=0.0),
                     symm_fwhm=10.0)}
 # Noise and multipole presets.  knee 0 means no 1/f.  P noise None is sqrt2 x T.
 NOISE_PRESETS = {
-    "f150": dict(t=24.0, p=None, beam=1.42, knee=(3000.0, 475.0),
-                 alpha=(-3.0, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
-                 freq=150.0),
+    # f150, f090: fits to the PA5 f150 and PA5 f090 noise of ACT DR6 (Louis
+    # et al. 2025, 2503.14452, Fig. 3), each crossing the lensed CMB TT and
+    # EE spectra where the data do.  tag: the name in the cache tag (f150
+    # was 24 uK-arcmin with the act knees; those sims stay under f150).
+    "f150": dict(t=27.0, p=None, beam=1.42, knee=(3150.0, 375.0),
+                 alpha=(-3.2, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
+                 freq=150.0, tag="f150dr6"),
+    "f090": dict(t=25.0, p=None, beam=2.0, knee=(1850.0, 0.0),
+                 alpha=(-3.5, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
+                 freq=97.0, tag="f090"),
     "act": dict(t=14.0, p=None, beam=1.42, knee=(3000.0, 475.0),
                 alpha=(-3.0, -4.5), lmin=600, lmax=3000, lmax_pol=3000,
                 freq=150.0),
@@ -284,10 +302,14 @@ parser.add_argument("--mask-apod", type=float, default=None,
                     help="cosine apodization width in degrees applied to the "
                          "thresholded mask (default 0 for every mask)")
 parser.add_argument("--noise", default="f150",
-                    choices=["f150", "act", "planck", "planck143", "planck217"],
-                    help="noise and multipole preset.  f150: 24 uK-arcmin in "
-                         "T, act: 14 uK-arcmin; both 1.4' beam, ACT 1/f knees, "
-                         "600 <= l <= 3000, 150 GHz.  planck: "
+                    choices=["f150", "f090", "act", "planck", "planck143",
+                             "planck217"],
+                    help="noise and multipole preset.  act: the ACT DR6 "
+                         "effective noise, 14 uK-arcmin in T, 1.42' beam.  "
+                         "f150, f090: the PA5 array-bands of ACT DR6, 27 and "
+                         "25 uK-arcmin in T, 1.42' and 2.0' beams, 150 and "
+                         "97 GHz.  All three with 1/f knees and "
+                         "600 <= l <= 3000.  planck: "
                          "33 uK-arcmin in T and 70 in P "
                          "(Planck 2018 143 GHz), 5' beam, white, "
                          "200 <= l <= 1800 with E and B to 1150 (as Ferreira "
@@ -479,7 +501,7 @@ MASK_LABEL = (f"gal{args.gal_cut:03d}" if args.mask == "galplane"
               else args.mask)
 # planck18: 33 / 70 uK-arcmin (sims made with the first --noise planck,
 # 45 uK-arcmin in T, were tagged planck_planck)
-CACHE_TAG = (f"{MASK_LABEL}_{'planck18' if args.noise == 'planck' else args.noise}"
+CACHE_TAG = (f"{MASK_LABEL}_{'planck18' if args.noise == 'planck' else _P.get('tag', args.noise)}"
              + (f"_{''.join(c if c.isalnum() or c in '-.' else '_' for c in _mask_stem)}"
                 if _other_mask else "")
              + "".join(f"_{o}" for o in _OVERRIDES)
