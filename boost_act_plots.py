@@ -339,6 +339,37 @@ def plot_maps_one_sim(S, path):
         path, f"{TITLES[S['name']]} estimator, one sim: L = 1–{lout}")
 
 
+def _hard_title(S, title):
+    if "mf_hard_over_u" in S:
+        title += ("\n$|$mean field$|$ / $|u_{\\rm in}|$ = "
+                  f"{float(S['mf_hard_over_u']):.2f}  (after hardening)")
+    return title
+
+
+def plot_maps_mean_hard(S, path):
+    """As plot_maps_mean, after hardening: the L = 1 dipoles of K^-1 y for
+    the mean field, the data mean and their difference (the mean estimate).
+    Hardening acts on L = 1 only, so these maps are pure dipoles."""
+    _three_maps(S, [
+        (S["hmf_map"], _hard_title(S, f"mean field after hardening: mean of "
+                                      f"{int(S['n_mf'])} unboosted sims")),
+        (S["hdat_map"], f"data after hardening: mean of {int(S['n_data'])} "
+                        "boosted sims"),
+        (S["hdat_map"] - S["hmf_map"],
+         "data − mean field after hardening (the mean estimate)")],
+        path, f"{TITLES[S['name']]}, hardened, averaged: L = 1")
+
+
+def plot_maps_one_sim_hard(S, path):
+    """As plot_maps_one_sim, after hardening (L = 1 dipoles only)."""
+    _three_maps(S, [
+        (S["hsim_map"], "one unboosted (mean-field) sim, after hardening"),
+        (S["hdat_sim_map"], "one boosted (data) sim, after hardening"),
+        (S["hdat_sim_map"] - S["hmf_map"],
+         "that data sim − mean field (the average), after hardening")],
+        path, f"{TITLES[S['name']]}, hardened, one sim: L = 1")
+
+
 def plot_noise(S, path):
     """Theory signal and the noise the filters use, as D_l in uK^2."""
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), layout="constrained")
@@ -1323,10 +1354,24 @@ def write_report(summary, path):
             f"{sy['K'][i, j]:+.4f} ± {sy['Kerr'][i, j]:.4f}" for j in range(6))
           + " |")
     mfu = mf_over_u(sy)
-    w(f"\nMean field relative to the input boost, |mean field| / |u_in| "
-      f"(L = 1 dipoles): aberration QE {mfu[0]:.2f}, modulation QE "
-      f"{mfu[1]:.2f}.\n")
-    if "mf_noise_over_u" in sy:
+    if "mf_hard_over_u" in sy:
+        mh = sy["mf_hard_over_u"]
+        w(f"\nMean field relative to the input boost after hardening, "
+          f"|K⁻¹ mean field| / |u_in| (L = 1 dipoles): aberration "
+          f"{mh[0]:.2f}, modulation {mh[1]:.2f}.  Before hardening: "
+          f"aberration QE {mfu[0]:.2f}, modulation QE {mfu[1]:.2f}.\n")
+    else:
+        w(f"\nMean field relative to the input boost, |mean field| / |u_in| "
+          f"(L = 1 dipoles): aberration QE {mfu[0]:.2f}, modulation QE "
+          f"{mfu[1]:.2f}.\n")
+    if "mf_noise_hard_over_u" in sy:
+        st, nz = sy["mf_std_hard_over_u"], sy["mf_noise_hard_over_u"]
+        w(f"With split or mat noise that is the cross estimate's, which has no "
+          f"instrument-noise part.  After hardening, the standard estimate's is "
+          f"{st[0]:.2f} (aberration) and {st[1]:.2f} (modulation); the "
+          f"noise-only maps alone give {nz[0]:.2f} and {nz[1]:.2f}, the "
+          "noise part the cross estimate removes.\n")
+    elif "mf_noise_over_u" in sy:
         st, nz = sy["mf_std_over_u"], sy["mf_noise_over_u"]
         w(f"With `--split-noise` that is the cross estimate's, which has no "
           f"instrument-noise part.  The standard estimate's is "
@@ -1674,6 +1719,15 @@ def make_all(summary, outdir=None):
                  os.path.join(outdir, name, "meanfield_map_mean.png"))
             save(plot_maps_one_sim, S,
                  os.path.join(outdir, name, "meanfield_map_one_sim.png"))
+        if "hmf_map" in S:                     # summaries from before lack it
+            sy = load(summary, "system")
+            if "mf_hard_over_u" in sy:
+                S["mf_hard_over_u"] = sy["mf_hard_over_u"][
+                    ("aberration", "modulation").index(name)]
+            save(plot_maps_mean_hard, S,
+                 os.path.join(outdir, name, "meanfield_map_mean_hardened.png"))
+            save(plot_maps_one_sim_hard, S,
+                 os.path.join(outdir, name, "meanfield_map_one_sim_hardened.png"))
         else:
             print(f"skipped {name}/meanfield_map_*.png: {summary} has no data "
                   "maps.  It was written by an older boost_act.py; rerun the "

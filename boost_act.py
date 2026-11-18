@@ -759,6 +759,16 @@ def lowl_map(packed):
                       ) * C_KMS
 
 
+def dipole_map(v):
+    """Vector v (3,), in units of u -> the L = 1 map c v.n, as lowl_map
+    makes it (the inverse of l1_vector on packed alm)."""
+    a = np.zeros(PACK_L.size, complex)
+    a[np.flatnonzero((PACK_L == 1) & (PACK_M == 0))[0]] = v[2] / np.sqrt(3 / (4 * np.pi))
+    a[np.flatnonzero((PACK_L == 1) & (PACK_M == 1))[0]] = (
+        (-v[0] + 1j * v[1]) / np.sqrt(3 / (2 * np.pi)))
+    return lowl_map(a)
+
+
 PHI_SEED = 1_000_000_000      # phi of sim seed s is drawn with PHI_SEED + s
 
 
@@ -1520,6 +1530,14 @@ def lens_removed_measured(mf, diff, dat, sy):
     return out
 
 
+def hard_over_u(K, m6):
+    """|K^-1 m6| / |u_in| for the aberration and modulation parts of a
+    six-component mean-field dipole m6 (estimator rows, in units of u)."""
+    h = np.linalg.solve(K, m6)
+    return np.array([np.linalg.norm(h[i:i + 3]) / np.linalg.norm(U_TRUE)
+                     for i in (0, 3)])
+
+
 def analyse(mf, diff, dat):
     Y, K, Kerr, m, C, est = solve((ABER_CASE, "MOD"), mf, diff, dat)
     # Leave-one-response-sim-out copies of K, for the figures' errors on
@@ -1536,6 +1554,9 @@ def analyse(mf, diff, dat):
     # (both in units of u, so this is |mean field| in km/s over 370 km/s).
     mf_over_u = np.array([np.linalg.norm(m[i:i + 3]) / np.linalg.norm(U_TRUE)
                           for i in (0, 3)])
+    # The same after hardening, K^-1 m: the mean field each separate estimate
+    # (aberration, modulation) would have if it were not subtracted.
+    mf_hard_over_u = hard_over_u(K, m)
 
     print(f"\nresponse K per unit u: rows {ABER_CASE} QE xyz, MOD QE xyz; "
           f"columns aberration xyz, modulation xyz")
@@ -1543,11 +1564,18 @@ def analyse(mf, diff, dat):
         print("   " + " ".join(f"{K[i, j]:+.3f}({Kerr[i, j] * 1e3:3.0f})"
                                for j in range(6)))
     print(f"   (MC error on the mean in units of 1e-3; b = {B_NU:.4f})")
-    print(f"   |mean field| / |u_in|:  {ABER_CASE} {mf_over_u[0]:.1f},  "
-          f"MOD {mf_over_u[1]:.1f}")
+    print(f"   |mean field| / |u_in| after hardening:  aberration "
+          f"{mf_hard_over_u[0]:.2f},  modulation {mf_hard_over_u[1]:.2f}")
     w_joint = joint_weights(K, y_mf)
     print("   joint weight on the aberration estimate x, y, z: "
           + ", ".join(f"{w:.3f}" for w in w_joint))
+
+    # Hardened L = 1 vectors, K^-1 y: the mean field, one mean-field sim,
+    # the data mean and one data sim, for the hardened mean-field maps.
+    Kinv = np.linalg.inv(K)
+    hard = {k: Kinv @ v for k, v in (("hmf", y_mf.mean(axis=0)), ("hsim", y_mf[0]),
+                                     ("hdat", y_dat.mean(axis=0)),
+                                     ("hdat_sim", y_dat[0]))}
 
     titles = {"aberration": "aberration (separate)",
               "modulation": "modulation (separate)",
@@ -1569,7 +1597,9 @@ def analyse(mf, diff, dat):
                          sim_map=lowl_map(Y[i][0][0]),
                          signal_map=lowl_map(sig),
                          dat_map=lowl_map(Y[i][2].mean(axis=0)),
-                         dat_sim_map=lowl_map(Y[i][2][0]))
+                         dat_sim_map=lowl_map(Y[i][2][0]),
+                         **{f"{k}_map": dipole_map(h[3 * i:3 * i + 3])
+                            for k, h in hard.items()})
     sd = np.sqrt(np.diag(C))
     # For the figures only: the copies of K, and the joint linear map G with
     # its copies (weights recomputed for each), so the plots can show errors
@@ -1577,7 +1607,8 @@ def analyse(mf, diff, dat):
     out["system"] = dict(K=K, Kerr=Kerr, corr=C / np.outer(sd, sd),
                          cov_raw=cov_raw, cov_hard=cov_hard,
                          n_cov=len(y_dat),
-                         mf_over_u=mf_over_u, K_jk=np.array(K_jk),
+                         mf_over_u=mf_over_u, mf_hard_over_u=mf_hard_over_u,
+                         K_jk=np.array(K_jk),
                          w_joint=w_joint, G=linear_maps(K, y_mf)["joint"],
                          G_jk=np.array([linear_maps(Kk, y_mf)["joint"]
                                         for Kk in K_jk]))
@@ -1717,17 +1748,19 @@ def main():
         def mf_dipole(x):
             m6 = np.concatenate([l1_vector(est_alm(x, nm)).mean(axis=0)
                                  for nm in (ABER_CASE, "MOD")])
-            return np.array([np.linalg.norm(m6[i:i + 3])
-                             / np.linalg.norm(U_TRUE) for i in (0, 3)])
-        results["system"].update(mf_noise_over_u=mf_dipole(mf_noise),
-                                 mf_std_over_u=mf_dipole(mf_std))
-        print(f"   {'split' if SPLIT else 'mat'} noise: |mean field| / |u_in| of the standard "
-              f"estimate {ABER_CASE} {results['system']['mf_std_over_u'][0]:.2f}, "
-              f"MOD {results['system']['mf_std_over_u'][1]:.2f}; its noise-only "
-              f"part {results['system']['mf_noise_over_u'][0]:.2f}, "
-              f"{results['system']['mf_noise_over_u'][1]:.2f}; the "
-              f"{'split' if SPLIT else 'mat'}-noise estimate's (above) has "
-              "no noise part")
+            return (np.array([np.linalg.norm(m6[i:i + 3])
+                              / np.linalg.norm(U_TRUE) for i in (0, 3)]),
+                    hard_over_u(results["system"]["K"], m6))
+        (nz_raw, nz_hard), (st_raw, st_hard) = mf_dipole(mf_noise), mf_dipole(mf_std)
+        results["system"].update(mf_noise_over_u=nz_raw, mf_std_over_u=st_raw,
+                                 mf_noise_hard_over_u=nz_hard,
+                                 mf_std_hard_over_u=st_hard)
+        hm = results["system"]["mf_hard_over_u"]
+        print(f"   {'split' if SPLIT else 'mat'} noise, |mean field| / |u_in| after hardening: "
+              f"standard estimate aberration {st_hard[0]:.2f}, modulation {st_hard[1]:.2f} "
+              f"(its noise-only part {nz_hard[0]:.2f}, {nz_hard[1]:.2f}); "
+              f"{'split' if SPLIT else 'mat'}-noise estimate {hm[0]:.2f}, {hm[1]:.2f}, "
+              "which has no noise part")
     if n_lens:
         phi = collect(PHI_LABELS, n_lens)          # (70, sim, 4, npack)
         if phi.shape[1] >= 2:
