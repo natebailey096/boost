@@ -53,6 +53,13 @@ different response and options for the mask and the noise level.
                            uK-arcmin white noise, 7' / 5' beam, 500 <= l <=
                            2000, 143 / 217 GHz; temperature only (P noise
                            1e5 uK-arcmin), as in that paper.
+    --kfilter              the ACT ground-pickup filter on every sim: after
+                           the mask, Fourier modes with |l_x| < 90 or |l_y| <
+                           50 are zeroed on the DR6 map band (dec -63 to +23
+                           deg), with l_x, l_y as pixell and pspy define them
+                           there (2503.14452, Sec. 3.3.1, App. C.3); then the
+                           mask's footprint is applied again.  Own cache tag,
+                           ..._kf.
 
 Needs the falafel branch darby_birefringence_patchytau and the tempura branch
 darbys_tau_edits2 (the ACT DR6 screening versions); it stops at start-up if
@@ -94,9 +101,8 @@ and plots go to mat_noise/.
 --measured-phi (--cmb lensed) adds a second version of the lensing removal
 behind amplitude_direction_lens.png: the data sims' lensing modes at
 2 <= L' <= min(--lens-lmax, --lout) are taken from their own reconstruction
-instead of being known (amplitude_direction_lensrec.png), and the same with
-each L' Wiener-filtered by C_L' / (C_L' + N_L') (amplitude_direction_lenswf.png).
-See lens_removed_measured.
+instead of being known (amplitude_direction_lensrec.png), used exactly as the
+known phi is.  See lens_removed_measured.
 
 --cmb lensed lenses every sim first: an unlensed CMB and a lensing potential
 phi, drawn from CAMB's C_L^phiphi (C_1 = 0: a lensing dipole would be a
@@ -365,9 +371,8 @@ parser.add_argument("--measured-phi", action="store_true",
                     help="--cmb lensed: also remove the lensing leakage with "
                          "each data sim's lensing modes 2 <= L' <= "
                          "min(--lens-lmax, --lout) measured from its own "
-                         "reconstruction instead of known, plain and "
-                         "Wiener-filtered (amplitude_direction_lensrec.png, "
-                         "amplitude_direction_lenswf.png)")
+                         "reconstruction instead of known "
+                         "(amplitude_direction_lensrec.png)")
 parser.add_argument("--cmb", default="unlensed", choices=["unlensed", "lensed"],
                     help="lensed: lens every sim with a phi drawn from "
                          "C_L^phiphi before the boost; cached under its own "
@@ -399,6 +404,16 @@ parser.add_argument("--lout", type=int, default=5,
                          "are for the figures).  Values other than 5 get their own "
                          "cache tag, <mask>_<noise>[_lensed]_lout<N>, since "
                          "cached sims hold only the modes they were made with")
+parser.add_argument("--kfilter", action="store_true",
+                    help="the ACT ground-pickup Fourier filter (Louis et al. "
+                         "2025, 2503.14452, Sec. 3.3.1 and App. C.3): the "
+                         "masked map is cut to the DR6 map band (dec -63 to "
+                         "+23 deg), Fourier modes with |l_x| < 90 or |l_y| < "
+                         "50 are zeroed (l_x, l_y from pixell's laxes on that "
+                         "band, as pspy's build_std_filter does), and the "
+                         "result is masked again by the mask's footprint.  "
+                         "Every sim, data, mean-field and response, is "
+                         "filtered.  Cached under its own tag, ..._kf")
 parser.add_argument("--n-meanfield", type=int, default=800)
 parser.add_argument("--n-response", type=int, default=60)
 parser.add_argument("--n-data", type=int, default=400)
@@ -506,7 +521,8 @@ CACHE_TAG = (f"{MASK_LABEL}_{'planck18' if args.noise == 'planck' else _P.get('t
                 if _other_mask else "")
              + "".join(f"_{o}" for o in _OVERRIDES)
              + ("_lensed" if LENSED else "")
-             + (f"_lout{LOUT}" if LOUT != 5 else ""))
+             + (f"_lout{LOUT}" if LOUT != 5 else "")
+             + ("_kf" if args.kfilter else ""))
 CACHE = os.path.join("cache_boost", CACHE_TAG)     # summary.npz and plots/
 SIMS = os.path.join(CACHE, "sims")                 # one .npy per sim
 # Effects applied to the data sims, the data sims' label, and where this
@@ -742,6 +758,69 @@ else:
     MASK = None                           # full sky: nothing to multiply
     W1 = W2 = 1.0
 
+# ---------------------------------------------------------------- k-space filter
+# ACT's ground-pickup filter.  ACT filters each DR6 map, a CAR band 43200 x
+# 10320 pixels of 0.5' from dec -63 to +23 deg (2503.14451), in flat-sky
+# Fourier space, zeroing |l_x| < 90 or |l_y| < 50 (2503.14452).  l_x and l_y
+# come from pixell's laxes with its default method, which for a CAR band sets
+# the x scale from the band's mean cos(dec): there l_x = 1.171 m, so the cut is
+# |m| <= 76, not |m| < 90.  Doing the same here, FFT of our full-sky map cut to
+# the same band, gives the same l_x and l_y.  Check KF_DEC_BAND against the
+# header of the DR6 maps used (dec of the first and last pixel rows).
+KF_LX, KF_LY = 90.0, 50.0                 # modes with |l_x| < 90 or |l_y| < 50 go
+KF_DEC_BAND = (-63.0, 23.0)               # deg, the DR6 map band
+KFILTER = args.kfilter
+if KFILTER:
+    _dec_rows = enmap.pix2sky(shape, wcs, [np.arange(shape[-2]),
+                                           np.zeros(shape[-2])])[0]
+    _in_band = np.where((_dec_rows >= KF_DEC_BAND[0] * utils.degree)
+                        & (_dec_rows <= KF_DEC_BAND[1] * utils.degree))[0]
+    KF_ROWS = slice(_in_band.min(), _in_band.max() + 1)
+    _bshape, _bwcs = enmap.slice_geometry(shape, wcs, (KF_ROWS, slice(None)))
+    _ly, _lx = enmap.laxes(_bshape, _bwcs)          # pixell default, as pspy
+    KF_KEEP = (np.abs(_ly)[:, None] >= KF_LY) & (np.abs(_lx)[None, :] >= KF_LX)
+    # The filter spreads power outside the footprint; ACT masks again after
+    # filtering (App. C.3), here with the mask's footprint (mask > 0), so the
+    # weighting inside is the mask's own.
+    KF_FOOT = (MASK > 0) if MASK is not None else None
+    if not IN_WORKER:
+        _lost = 0.0
+        if MASK is not None:
+            _out = np.ones(shape[-2], bool)
+            _out[KF_ROWS] = False
+            _lost = float((MASK[_out] * pixarea[..., _out, :]).sum()
+                          / (MASK * pixarea).sum())
+        print(f"k-space filter: |l_x| < {KF_LX:g} or |l_y| < {KF_LY:g} removed "
+              f"on the band dec {KF_DEC_BAND[0]:g} to {KF_DEC_BAND[1]:g} deg "
+              f"({_bshape[-2]} x {_bshape[-1]} pixels); l_x per m "
+              f"{abs(_lx[1]):.4f}, so |m| <= {int(np.ceil(KF_LX / abs(_lx[1]))) - 1}"
+              f" removed; l_y step {abs(_ly[1]):.3f}; fraction of Fourier "
+              f"modes kept {KF_KEEP.mean():.4f}"
+              + (f"; mask weight outside the band {_lost:.2e}"
+                 if MASK is not None else ""), flush=True)
+
+
+def kfilter(tqu):
+    """The ACT ground-pickup filter on a (masked) TQU map: cut to the DR6 band,
+    zero |l_x| < 90 or |l_y| < 50, inverse FFT, zero outside the band and,
+    with a mask, outside its footprint.  Works in place on tqu (reconstruct
+    passes its own masked copy), one component at a time, to keep the peak
+    memory down.  A real FFT, half the memory of a complex one; the cut is
+    symmetric in l_x, so the kept half of KF_KEEP is all it needs."""
+    nx = tqu.shape[-1]
+    keep = KF_KEEP[:, :nx // 2 + 1]
+    for c in range(tqu.shape[0]):
+        band = np.asarray(tqu[c, KF_ROWS, :])
+        f = np.fft.rfft2(band)
+        f *= keep
+        tqu[c, KF_ROWS, :] = np.fft.irfft2(f, s=band.shape)
+        del f, band
+    tqu[:, :KF_ROWS.start, :] = 0
+    tqu[:, KF_ROWS.stop:, :] = 0
+    if KF_FOOT is not None:
+        tqu *= KF_FOOT
+    return tqu
+
 # ---------------------------------------------------------------- sims
 PACK_L = np.array([l for l in range(LOUT + 1) for m in range(l + 1)])
 PACK_M = np.array([m for l in range(LOUT + 1) for m in range(l + 1)])
@@ -894,9 +973,12 @@ def boost(tqu, direction, beta, aberrate=True, modulate=True):
 def reconstruct(tqu):
     """TQU map -> unnormalised TT, TE, EE lensing and TT modulation alm for
     L <= LOUT, shape (4, npack).  The mask, if any, multiplies the map here,
-    so both estimators see the same masked, filtered T."""
+    so both estimators see the same masked, filtered T.  With --kfilter the
+    masked map then goes through the ACT ground-pickup filter (kfilter)."""
     if MASK is not None:
         tqu = MASK * tqu
+    if KFILTER:
+        tqu = kfilter(tqu if MASK is not None else tqu.copy())
     alm = curvedsky.map2alm(tqu, lmax=MLMAX)
     f = [qe.filter_alms(a, fl, lmin=LMIN, lmax=LMAX)
          for a, fl in zip(alm, FILTERS)]
@@ -1455,78 +1537,59 @@ def packed_to_real(a, Ls):
 
 
 def lens_removed_measured(mf, diff, dat, sy):
-    """lens_removed with phi measured instead of known (--measured-phi): the
-    lensing modes 2 <= L' <= Lm = min(LPHI, LOUT) of each data sim are taken
+    """lens_removed with phi measured instead of known (--measured-phi),
+    otherwise exactly the same: u - sum_L'M' V_L'M' phi-hat_L'M', with
+    phi-hat each data sim's lensing modes 2 <= L' <= Lm = min(LPHI, LOUT)
     from its own lensing reconstruction (the T+P estimator that gives the
     aberration dipole at L = 1).  L' = 1 is left out: there the
     reconstruction is the aberration signal itself.
-      psi      the reconstruction's real-basis modes at those L', less their
-               mean over the mean-field sims
-      phi-hat  psi R^-1: R (lens_R_ab, from the lensing-response sims) is
-               how each true mode shows up in psi; a mask mixes modes and
-               scales them down, so psi alone is not phi
-      u - phi-hat F V   V the velocity each mode puts into the estimate
-               (lens_V, as in lens_removed); F = 1 ('lensrec') or, per L',
-               the Wiener factor f = C_L' / var(phi-hat) over the
-               mean-field sims, = C_L' / (C_L' + N_L') ('lenswf')
-    The boost itself leaks into psi at L' >= 2 (B, from the response sims),
-    so a physical boost u gives E[correction] = u B R^-1 F V =: u M; the
-    result is divided by (I - M) to keep it unbiased.  Phi-hat also carries
-    the reconstruction noise N_L', which the plain version adds to the
-    estimate in full; the Wiener-filtered one only removes the part of
-    each L' the reconstruction can tell from noise.  The null test is the
-    uncorrected estimate's."""
+      phi-hat  (psi - <psi>_mf) R^-1: psi the reconstruction's real-basis
+               modes at those L', less their mean over the mean-field sims;
+               R (lens_R_ab, from the lensing-response sims) how each true
+               mode shows up in psi (a mask mixes modes and scales them
+               down, so psi alone is not phi)
+    Nothing else is done: no filtering, and the expected values are left as
+    they are, as in lens_removed.  So anything the measured phi carries
+    besides lensing shows up directly: its reconstruction noise adds to the
+    scatter, and the boost's own leakage into psi at L' >= 2 (B, from the
+    response sims) shifts the mean by u_in B R^-1 V, which is printed as a
+    check.  The null test is the uncorrected estimate's."""
     Lm = min(LPHI, LOUT)
     if Lm < 2:
         print("measured phi: needs --lens-lmax and --lout >= 2")
         return {}
     Ls = list(range(2, Lm + 1))
     sel = np.array([2 <= L <= Lm for L, M in PHI_MODES])
-    L_of = np.array([L for L, M in PHI_MODES])[sel]
     psi = lambda x: packed_to_real(-est_alm(x, ABER_CASE), Ls)   # phi = -u.n
-    p_mf, p_dat = psi(mf), psi(dat)
-    p0 = p_mf.mean(axis=0)
+    p0 = psi(mf).mean(axis=0)
     R = packed_to_real(np.asarray(sy["lens_R_ab"])[sel], Ls)    # (in, out)
-    Rinv = np.linalg.inv(R)
-    x_mf, x_dat = (p_mf - p0) @ Rinv, (p_dat - p0) @ Rinv
-    D = psi(diff) / BETA                     # (effect, axis, sim, mode)
-    B = D.mean(axis=2)                       # psi per unit u, per axis
-    B_phys, B_run = B[0] + B[1], ABERRATE * B[0] + MODULATE * B[1]
-    var = x_mf.var(axis=0, ddof=1)
-    f_L = {L: min(1.0, CLPP[L] / var[L_of == L].mean()) for L in Ls}
+    phi_hat = (psi(dat) - p0) @ np.linalg.inv(R)                # (sim, mode)
     V = np.asarray(sy["lens_V"])[:, sel]     # (estimate, mode, 3)
+    B = (psi(diff) / BETA).mean(axis=2)      # (effect, axis, mode): psi per unit u
+    B_run = ABERRATE * B[0] + MODULATE * B[1]
     est = solve((ABER_CASE, "MOD"), mf, diff, dat)[5]
+    n_in = U_TRUE / np.linalg.norm(U_TRUE)
     print(f"\nwith each data sim's lensing modes 2 <= L' <= {Lm} measured "
-          "from its own reconstruction")
+          "from its own reconstruction (phi-hat used as if it were phi)")
     print(f"   lensing response R at those modes: diagonal mean "
-          f"{np.diag(R).mean():.3f}, condition number {np.linalg.cond(R):.1f}")
-    print("   reconstruction noise vs signal per mode, N_L'/C_L' = "
-          + ", ".join(f"{L}: {1 / f - 1:.1f}" if f > 0 else f"{L}: inf"
-                      for L, f in f_L.items()))
+          f"{np.diag(R).mean():.3f}, condition number {np.linalg.cond(R):.3g}")
     out = {}
-    for tag, F in (("lensrec", np.ones(len(L_of))),
-                   ("lenswf", np.array([f_L[L] for L in L_of]))):
-        for k, name in enumerate(("aberration", "modulation", "joint")):
-            W = (Rinv * F) @ V[k]            # phi-hat from psi, then velocity
-            M = B_phys @ W                   # (3, 3): bias of a physical boost
-            fix = np.linalg.inv(np.eye(3) - M)
-            e = dict(est[name])
-            u = (e["u"] - x_dat * F @ V[k]) @ fix
-            e["u_expect"] = (e["u_expect"] - U_TRUE @ B_run @ W) @ fix
-            st = stats(u)
-            sd = st.std(axis=0, ddof=1)
-            e.update(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
-                     err=sd / np.sqrt(len(st)))
-            what = ("phi measured" if tag == "lensrec"
-                    else "phi measured, Wiener-filtered")
-            out[f"{name}_{tag}"] = report(
-                f"{name}, lensing 2 <= L' <= {Lm} removed, {what} "
-                f"(boost leakage |M| = {np.linalg.norm(M, 2):.3f})", e)
-            out[f"{name}_{tag}"].update(
-                phi_lmin=2, phi_lmax=Lm,
-                lens_variant=f"lensing 2 ≤ L′ ≤ {Lm} removed, "
-                             + what.replace("phi", "φ"),
-                wiener=np.array([f_L[L] for L in Ls]))
+    for k, name in enumerate(("aberration", "modulation", "joint")):
+        e = dict(est[name])
+        u = e["u"] - phi_hat @ V[k]
+        shift = U_TRUE @ B_run @ np.linalg.solve(R, V[k])   # mean the boost puts in
+        st = stats(u)
+        sd = st.std(axis=0, ddof=1)
+        e.update(u=u, stats=st, mean=st.mean(axis=0), sd=sd,
+                 err=sd / np.sqrt(len(st)))
+        print(f"   {name}: the boost's own leakage into phi-hat moves the mean "
+              f"along the input by {-C_KMS * shift @ n_in:+.1f} km/s "
+              f"(input {C_KMS * np.linalg.norm(U_TRUE):.1f})")
+        out[f"{name}_lensrec"] = report(
+            f"{name}, lensing 2 <= L' <= {Lm} removed, phi measured", e)
+        out[f"{name}_lensrec"].update(
+            phi_lmin=2, phi_lmax=Lm,
+            lens_variant=f"lensing 2 ≤ L′ ≤ {Lm} removed, φ measured")
     return out
 
 
@@ -1794,6 +1857,8 @@ def main():
                cl_tt=cltt, cl_ee=clee, nl_tt=nltt, nl_ee=nlee,
                pack_l=PACK_L, pack_m=PACK_M, fsky=W1, w2=W2,
                aber_case=ABER_CASE, boost=args.boost, cmb=args.cmb,
+               kfilter=KFILTER, kfilter_lx_ly=[KF_LX, KF_LY],
+               kfilter_dec_band=list(KF_DEC_BAND),
                clpp_low=CLPP[:LPHI + 1],
                map_dec=np.degrees(enmap.posaxes(MAP_SHAPE, MAP_WCS)[0]),
                map_ra=np.degrees(enmap.posaxes(MAP_SHAPE, MAP_WCS)[1]))
