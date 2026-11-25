@@ -53,6 +53,7 @@ bglobal:0.8,bcoadd,pglobal:0.02,ptilt:0.02):
                    (clipped outside), e.g. a beam or transfer-function error.
   pbeam:DFWHM      C_l B_l^2(FWHM + DFWHM) / B_l^2(FWHM), FWHM the preset's
                    beam (arcmin): a beam-width error.
+  pband:EPS:L1:L2  C_l (1 + EPS) for L1 <= l < L2, unchanged elsewhere.
   pfile:PATH       C_l f(l) from a text file: columns l, f_T, f_P.
   The p* scenarios take two optional fields after the value: which spectra
   (TEB, the default; T; or P = E and B), and where the change is made:
@@ -117,6 +118,9 @@ parser.add_argument("--report", action="store_true",
                     help="analyse whatever is cached; make no sims")
 parser.add_argument("--selftest", action="store_true",
                     help="check the unperturbed path against boost_act.py and stop")
+parser.add_argument("--summary-name", default="summary",
+                    help="folder under <cache>/perturb/ for the cross-scenario summary, "
+                         "so separate scenario sets don't overwrite each other's")
 parser.add_argument("--plots", default="ref,kwrong",
                     help="combinations that get boost_act's full figure set "
                          "(all: every one); the rest get summary.npz only")
@@ -208,7 +212,10 @@ class Scenario:
             self.rT = clip_band(np.interp(ELL, t[:, 0], t[:, 1])) / B_K
             self.rP = clip_band(np.interp(ELL, t[:, 0], t[:, 2])) / B_K
             self.note = f"b_nu(l) from {par[0]}"
-        elif kind in ("pglobal", "ptilt", "pbeam", "pfile"):
+        elif kind in ("pglobal", "ptilt", "pbeam", "pfile", "pband"):
+            if kind == "pband":                      # pband:EPS:L1:L2[:FIELDS[:STAGE]]
+                l1, l2 = int(par[1]), int(par[2])
+                par = [par[0]] + par[3:]
             val = par[0]
             fields = par[1] if len(par) > 1 else "TEB"
             self.stage = par[2] if len(par) > 2 else "obs"
@@ -223,6 +230,10 @@ class Scenario:
                 lp, dl = (B.LMIN + B.LMAX) / 2, (B.LMAX - B.LMIN) / 2
                 fT = fP = clip_band(1 + eps * (ELL - lp) / dl)
                 self.note = f"CMB power x (1 {-eps:+g}) at l={B.LMIN} to (1 {eps:+g}) at l={B.LMAX}, linear"
+            elif kind == "pband":
+                eps = float(val)
+                fT = fP = np.where((ELL >= l1) & (ELL < l2), 1 + eps, 1.0)
+                self.note = f"CMB power x (1 {eps:+g}) for {l1} <= l < {l2}, unchanged elsewhere"
             elif kind == "pbeam":
                 d = float(val)
                 fw = B.BEAM
@@ -513,7 +524,7 @@ def report():
             "kwrong_mfwrong": "data perturbed, mean field and K fiducial",
             "kmatched": "data, mean field and K perturbed (closure)"}
     plots = set(WHAT) if opt.plots == "all" else set(opt.plots.split(","))
-    os.makedirs(os.path.join(ROOT, "summary"), exist_ok=True)
+    os.makedirs(os.path.join(ROOT, opt.summary_name), exist_ok=True)
     rows, store = [], {}
     for sc in SCEN:
         print(f"\n================ {sc.spec}: {sc.note}", flush=True)
@@ -702,7 +713,7 @@ def report():
         print("\nnothing to summarise yet")
         return
     # ---------------- across scenarios
-    np.savez(os.path.join(ROOT, "summary", "numbers.npz"),
+    np.savez(os.path.join(ROOT, opt.summary_name, "numbers.npz"),
              **{f"{t}.{k}": v for t, d in store.items() for k, v in d.items()},
              scenarios=np.array([s.spec for s in SCEN]))
     scen = [s.spec for s in SCEN if s.tag in store]
@@ -743,10 +754,10 @@ def report():
             a.set_ylim(lo - 0.08 * (hi - lo), hi + 0.08 * (hi - lo))
     ax[0].legend(frameon=False, fontsize=8, loc="best")
     fig.suptitle(f"Sky vs our sims: shift of the hardened estimates (input {C * np.linalg.norm(B.U_TRUE):.0f} km/s)")
-    fig.savefig(os.path.join(ROOT, "summary", "summary.png"))
+    fig.savefig(os.path.join(ROOT, opt.summary_name, "summary.png"))
     plt.close(fig)
 
-    with open(os.path.join(ROOT, "summary", "summary.md"), "w") as f:
+    with open(os.path.join(ROOT, opt.summary_name, "summary.md"), "w") as f:
         f.write(f"# Sky vs K-sims mismatch ({B.CACHE_TAG}, mat noise)\n\n"
                 f"Shift of the mean hardened estimate along the input direction, relative to the "
                 f"fiducial run on the same data skies, in km/s (input "
@@ -767,7 +778,7 @@ def report():
                 "of any change in the modulation part into the aberration estimate.  In the b_nu "
                 "scenarios it is the difference between measured and predicted (checked on one "
                 "sky: with the aberration switched off in the data the difference goes to zero).\n")
-    print(f"\nwrote {ROOT}/summary/ (summary.png, summary.md, numbers.npz) and "
+    print(f"\nwrote {ROOT}/{opt.summary_name}/ (summary.png, summary.md, numbers.npz) and "
           f"{ROOT}/<scenario>/ (figs/, and boost_act's summary for each combination)")
 
 
